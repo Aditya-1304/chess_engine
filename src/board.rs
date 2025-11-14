@@ -71,6 +71,47 @@ impl Board {
     }
     board.occupancy[2] = 
       board.occupancy[Color::White as usize] | board.occupancy[Color::Black as usize];
+
+    // which side to move??
+    board.side_to_move = match parts[1] {
+        "w" => Color::White,
+        "b" => Color::Black,
+        _ => return Err("Invalid FEN: Invalid side to move"),
+    };
+
+    // Castling rights
+    board.castling_rights = 0;
+    for ch in parts[2].chars() {
+      match ch {
+        'K' => board.castling_rights |= 0b0001,
+        'Q' => board.castling_rights |= 0b0010,
+        'k' => board.castling_rights |= 0b0100,
+        'q' => board.castling_rights |= 0b1000,
+        '-' => {}
+        _ => return Err("Invalid FEN: invalid castling rights"),
+      }
+    }
+
+    // En passant check 
+    board.en_passant = if parts[3] == "-" {
+      None
+    } else {
+      let chars: Vec<char> = parts[3].chars().collect();
+      if chars.len() != 2 {
+        return Err("Invalid FEN: invalid en passant square");
+      }
+      let file = (chars[0] as u8) - b'a';
+      let rank = (chars[1] as u8) - b'1';
+      if file > 7 || rank > 7 {
+        return Err("Invaid FEN: invalid en passent sqaure");
+      }
+      Some(rank * 8 + file)
+    };
+
+    // halfmove 
+    board.halfmove_clock = parts[4]
+      .parse()
+      .map_err(|_| "Invalid FEN: invalid halfmove clock")?;
     Ok(Board::default())
   }
 
