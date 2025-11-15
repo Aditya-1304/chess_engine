@@ -4,7 +4,6 @@ use crate::types::{PieceType, Square};
   Bits 6-11 to square (64 squares)
   Bits 12-15: Flags (promotion, castling)
 */
-
 pub type Move = u16;
 
 pub const QUIET_MOVE_FLAG: u16 = 0b0000;
@@ -19,3 +18,47 @@ pub const BISHOP_PROMOTION_FLAG: u16 = 0b1001;
 pub const ROOK_PROMOTION_FLAG: u16 = 0b1010;
 pub const QUEEN_PROMOTION_FLAG: u16 = 0b1011;
 
+pub const KNIGHT_PROMOTION_CAPTURE_FLAG: u16 = 0b1100;
+pub const BISHOP_PROMOTION_CAPTURE_FLAG: u16 = 0b1101;
+pub const ROOK_PROMOTION_CAPTURE_FLAG: u16 = 0b1110;
+pub const QUEEN_PROMOTION_CAPTURE_FLAG: u16 = 0b1111;
+
+/// Creates a new move from its components.
+pub fn new(from: Square, to: Square, flag: u16) -> Move {
+  (from as u16) | ((to as u16) << 6) | (flag << 12)
+}
+
+/// Extracts the from_sqaure from a move
+pub fn from_sq(m: Move) -> Square {
+  (m & 0x3F) as Square
+}
+
+/// Extracts the to_square from a move
+pub fn to_sq(m: Move) -> Square {
+  ((m >> 6) & 0x3f) as Square
+}
+
+/// Extracts the flag from a move
+pub fn flag(m: Move) -> u16 {
+  (m >> 12) & 0xF
+}
+
+/// Checks if a move is a capture
+pub fn is_capture(m: Move) -> bool {
+  flag(m) & 0b0100 != 0
+}
+
+/// Checks if a move is a promotion
+pub fn is_promotion(m: Move) -> bool {
+  flag(m) & 0b1000 != 0
+}
+
+/// Gets the promotion piece type from a promotion move
+pub fn promotion_piece(m: Move) -> PieceType {
+  match flag(m) & 0b0011 {
+    0 => PieceType::Knight,
+    1 => PieceType::Bishop,
+    2 => PieceType::Rook,
+    _ => PieceType::Queen,
+  }
+}

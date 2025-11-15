@@ -4,9 +4,12 @@ use crate::types::{Bitboard, Color, PieceType, Square};
 
 pub type ZHash = u64;
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UndoInfo {
-
+  pub old_castling_rights: u8,
+  pub old_en_passant: Option<Square>,
+  pub old_halfmove_clock: u8,
+  pub captured_piece_type: Option<PieceType>,
 }
 
 #[derive(Clone)]
@@ -21,6 +24,12 @@ pub struct Board {
   pub zobrist_hash: ZHash,
   pub history: Vec<UndoInfo>, // stack for undoing the moves
 }
+
+
+const WK_CASTLE: u8 = 0b0001;
+const WQ_CASTLE: u8 = 0b0010;
+const BK_CASTLE: u8 = 0b0100;
+const BQ_CASTLE: u8 = 0b1000;
 
 impl Board {
 
@@ -118,7 +127,7 @@ impl Board {
     board.fullmove_number = parts[5]
       .parse()
       .map_err(|_| "Invalid FEN: invalid fullmove number")?;
-    
+
     Ok(board)
   }
 
@@ -209,6 +218,37 @@ impl Board {
     fen.push_str(&self.fullmove_number.to_string());
 
     fen
+  }
+
+  fn piece_type_on(&self, sq: Square) -> Option<PieceType> {
+    let bit = 1 << sq;
+    for pt_idx in 0..6 {
+      if (self.pieces[pt_idx][0] | self.pieces[pt_idx][1]) & bit != 0 {
+        return Some(PieceType::from(pt_idx));
+      }
+    }
+    None
+  }
+
+  fn move_piece(&mut self, pt: PieceType, c: Color, from: Square, to: Square) {
+    let from_to_bb = (1 << from) | (1 << to);
+    self.pieces[pt as usize][c as usize] ^= from_to_bb;
+    self.occupancy[c as usize] ^= from_to_bb;
+    self.occupancy[2] ^= from_to_bb;
+  }
+
+  fn add_piece(&mut self, pt: PieceType, c: Color, sq: Square) {
+    let bit = 1 << sq;
+    self.pieces[pt as usize][c as usize] |= bit;
+    self.occupancy[c as usize] |= bit;
+    self.occupancy[2] |= bit;
+  }
+
+  fn remove_piece(&mut self, pt: PieceType, c: Color, sq: Square) {
+    let bit = 1 << sq;
+    self.pieces[pt as usize][c as usize] &= !bit;
+    self.occupancy[c as usize] &= !bit;
+    self.occupancy[2] &= !bit;
   }
 
   pub fn make_move(&mut self, m:crate::types::Move) -> UndoInfo {
