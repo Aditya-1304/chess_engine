@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::types::{Bitboard, Color, PieceType, Square};
 
 pub type ZHash = u64;
@@ -112,7 +114,7 @@ impl Board {
     board.halfmove_clock = parts[4]
       .parse()
       .map_err(|_| "Invalid FEN: invalid halfmove clock")?;
-    Ok(Board::default())
+    Ok(board)
   }
 
   pub fn to_fen(&self) -> String {
@@ -129,6 +131,59 @@ impl Board {
   }
 }
 
+impl fmt::Display for Board {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      let mut output = String::new();
+      for rank in (0..8).rev() {
+        output.push_str(&format!("{} ", rank + 1));
+        for file in 0..8 {
+          let square = rank * 8 + file;
+          let bit = 1 << square;
+          let mut piece_char = '.';
+
+          for pt_idx in 0..6 {
+            if (self.pieces[pt_idx][Color::White as usize] & bit ) != 0 {
+              piece_char = match pt_idx.into() {
+                PieceType::Pawn => 'P',
+                PieceType::Knight => 'N',
+                PieceType::Bishop => 'B',
+                PieceType::Rook => 'R',
+                PieceType::Queen => 'Q',
+                PieceType::King => 'K',
+              };
+              break;
+            }
+
+            if (self.pieces[pt_idx][Color::Black as usize] & bit) != 0 {
+              piece_char = match pt_idx.into() {
+                PieceType::Pawn => 'p',
+                PieceType::Knight => 'n',
+                PieceType::Bishop => 'b',
+                PieceType::Rook => 'r',
+                PieceType::Queen => 'q',
+                PieceType::King => 'k',
+              };
+              break;
+            }
+          }
+          output.push_str(&format!("{} ", piece_char));
+        }
+        output.push('\n');
+      }
+      output.push_str("  a b c d e f g h");
+      writeln!(f, "{}", output)?;
+      writeln!(f, "Side to move: {:?}", self.side_to_move)?;
+      writeln!(
+        f,
+        "Castling: {}{}{}{}",
+        if self.castling_rights & 0b1 > 0 { "K" } else { "" },
+        if self.castling_rights & 0b10 > 0 { "Q" } else { "" },
+        if self.castling_rights & 0b100 > 0 { "k" } else { "" },
+        if self.castling_rights & 0b1000 > 0 { "q" } else { "" }
+      )?;
+      Ok(())
+  }
+}
 
 impl Default for Board {
   fn default() -> Self {

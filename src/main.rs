@@ -8,13 +8,14 @@ fn main() {
         let fen = &args[2];
         match Board::from_fen(fen) {
             Ok(board) => {
-                println!("Board created successfully from FEN.");
-                println!("Side to move {:?}", board.side_to_move);
-                println!("Castling rights: {}", board.castling_rights);
+                println!("{}", board);
             }
             Err(e) => eprintln!("Error parsing FEN: {}", e),
         }
     } else {
         println!("ChessEngine v1.0");
+        println!("Usage: cargo run -- --fen \"<FEN_STRING>\"");
+        println!("\nExample (starting position):");
+        println!("cargo run -- --fen \"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\"");
     }
 }
