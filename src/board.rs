@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::types::{Bitboard, Color, PieceType, Square};
+use crate::{moves, types::{Bitboard, Color, PieceType, Square}};
 
 pub type ZHash = u64;
 
@@ -252,8 +252,68 @@ impl Board {
   }
 
   pub fn make_move(&mut self, m:crate::types::Move) -> UndoInfo {
+    let from = moves::from_sq(m);
+    let to = moves::to_sq(m);
+    let flag = moves::flag(m);
+    let us = self.side_to_move;
+    let them = if us == Color::White { Color::Black } else { Color::White };
 
-    UndoInfo {}
+    let undo = UndoInfo {
+      old_castling_rights: self.castling_rights,
+      old_en_passant: self.en_passant,
+      old_halfmove_clock: self.halfmove_clock,
+      captured_piece_type: self.piece_type_on(to),
+    };
+
+    let moving_piece = self.piece_type_on(from).unwrap();
+
+    /// captures handling
+    if moves::is_capture(m) {
+      if flag == moves::EN_PASSANT_CAPTURE_FLAG {
+        let captured_sq = if us == Color::White { to - 8 } else { to + 8 };
+        self.remove_piece(PieceType::Pawn, them, captured_sq);
+      }else {
+        let captured_piece = undo.captured_piece_type.unwrap();
+        self.remove_piece(captured_piece, them, to);
+      }
+    }
+
+    self.move_piece(moving_piece, us, from, to);
+
+    if moves::is_promotion(m) {
+      let promo_piece = moves::promotion_piece(m);
+      self.remove_piece(PieceType::Pawn, us, to);
+      self.add_piece(promo_piece, us, to);
+    } else if flag == moves::KING_CASTLE_FLAG {
+        let (rook_from, rook_to) = if us == Color::White { (7,5) } else { (63, 61)};
+        self.move_piece(PieceType::Rook, us, rook_from, rook_to);
+    } else if flag == moves::QUEEN_CASTLE_FLAG {
+      let (rook_from, rook_to) = if us == Color::White { (0, 3) } else { (56, 59) };
+      self.move_piece(PieceType::Rook, us, rook_from, rook_to);
+    }
+
+    self.en_passant = if flag == moves::DOUBLE_PAWN_PUSH_FLAG {
+      Some(if us == Color::White {from + 8} else { from - 8 })
+    } else {
+      None
+    };
+
+    if moving_piece == PieceType::Pawn || moves::is_capture(m) {
+      self.halfmove_clock = 0;
+    } else {
+      self.halfmove_clock += 1;
+    }
+
+    if us == Color::Black {
+      self.fullmove_number += 1;
+    }
+
+    self.castling_rights &= !( (1 << from) | (1 << to) ).trailing_zeros() as u8;
+
+
+    self.side_to_move = them;
+
+    undo
   }
 
   pub fn unmake_move(&mut self, undo: UndoInfo) {
