@@ -1,6 +1,8 @@
 use std::fmt;
 
-use crate::{moves::{self, Move}, types::{Bitboard, Color, PieceType, Square}, zobrist};
+use crate::{
+  movegen, moves::{self, Move, MoveList}, types::{Bitboard, Color, PieceType, Square}, zobrist
+};
 
 pub type ZHash = u64;
 
@@ -429,6 +431,27 @@ impl Board {
     }
   }
 
+  pub fn generate_pseudo_legal_moves(&self, list: &mut MoveList) {
+    movegen::generate_pseudo_legal_moves(self, list);
+  }
+
+  pub fn perft(&mut self, depth: u8) -> u64 {
+    if depth == 0 {
+      return 1;
+    }
+
+    let mut nodes = 0;
+    let mut move_list = MoveList::new();
+    self.generate_pseudo_legal_moves(&mut move_list);
+
+    for &m in move_list.iter() {
+      let undo = self.make_move(m);
+      nodes += self.perft(depth - 1);
+      self.unmake_move(m, undo);
+    }
+    nodes
+  }
+
 }
 
 impl fmt::Display for Board {
@@ -533,5 +556,13 @@ mod tests {
 
     assert_eq!(original_fen, board.to_fen());
     assert_eq!(original_hash, board.zobrist_hash);
+  }
+
+  #[test]
+  fn perft_startpos() {
+    let mut board =
+      Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+    assert_eq!(board.perft(1), 20);
+    assert_eq!(board.perft(2), 400);
   }
 }

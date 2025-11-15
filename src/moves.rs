@@ -62,3 +62,27 @@ pub fn promotion_piece(m: Move) -> PieceType {
     _ => PieceType::Queen,
   }
 }
+
+pub struct MoveList {
+  moves: [Move; 256],
+  count: usize,
+}
+
+impl MoveList {
+  pub fn new() -> Self {
+    MoveList { moves: [0; 256], count: 0 }
+  }
+
+  pub fn push(&mut self, m: Move) {
+    self.moves[self.count] = m;
+    self.count += 1; 
+  }
+
+  pub fn len(&self) -> usize {
+    self.count
+  }
+
+  pub fn iter(&self) -> std::slice::Iter<'_,Move> {
+    self.moves[..self.count].iter()
+  }
+}
