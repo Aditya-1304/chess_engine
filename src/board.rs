@@ -431,6 +431,24 @@ impl Board {
     }
   }
 
+  pub fn is_square_attacked(&self, sq: Square, attacker_color: Color) -> bool {
+    let pawn_attacks = movegen::pawn_attacks(if attacker_color == Color::White { Color::Black } else { Color::White }, sq);
+    if (pawn_attacks & self.pieces[PieceType::Pawn as usize][attacker_color as usize]) != 0 {
+      return true;
+    }
+
+    let knight_attacks = movegen::knight_attacks(sq);
+    if (knight_attacks & self.pieces[PieceType::Knight as usize][attacker_color as usize]) != 0 {
+      return true;
+    }
+
+    let king_attacks = movegen::king_attacks(sq);
+    if (king_attacks & self.pieces[PieceType::King as usize][attacker_color as usize]) != 0 {
+      return true;
+    }
+    false
+  }
+
   pub fn generate_pseudo_legal_moves(&self, list: &mut MoveList) {
     movegen::generate_pseudo_legal_moves(self, list);
   }
@@ -565,4 +583,13 @@ mod tests {
     assert_eq!(board.perft(1), 20);
     assert_eq!(board.perft(2), 400);
   }
+
+  // #[test]
+  // fn perft_kiwi() {
+  //   let mut board =
+  //     Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+  //       .unwrap();
+  //   assert_eq!(board.perft(1), 48);
+  //   assert_eq!(board.perft(2), 2039);
+  // }
 }
