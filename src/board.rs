@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{moves::{self, Move}, types::{Bitboard, Color, PieceType, Square}};
+use crate::{moves::{self, Move}, types::{Bitboard, Color, PieceType, Square}, zobrist};
 
 pub type ZHash = u64;
 
@@ -10,6 +10,7 @@ pub struct UndoInfo {
   pub old_en_passant: Option<Square>,
   pub old_halfmove_clock: u8,
   pub captured_piece_type: Option<PieceType>,
+  pub old_zobrist_hash: ZHash,
 }
 
 #[derive(Clone)]
@@ -140,6 +141,8 @@ impl Board {
       .parse()
       .map_err(|_| "Invalid FEN: invalid fullmove number")?;
 
+      board.zobrist_hash = board.calculate_zobrist_hash();
+
     Ok(board)
   }
 
@@ -263,7 +266,37 @@ impl Board {
     self.occupancy[2] &= !bit;
   }
 
+  fn calculate_zobrist_hash(&self) -> ZHash {
+    let keys = zobrist::keys();
+    let mut hash: ZHash = 0;
+    
+    for pt_idx in 0..6 {
+      for c_idx in 0..2 {
+        let mut bb = self.pieces[pt_idx][c_idx];
+        while bb != 0 {
+          let sq = bb.trailing_zeros() as Square;
+          hash ^= keys.pieces[pt_idx][c_idx][sq as usize];
+          bb &= bb - 1;
+        }
+      }
+    }
+
+    hash ^= keys.castling[self.castling_rights as usize];
+
+    if let Some(sq) = self.en_passant {
+      let file = (sq % 8) as usize;
+      hash ^= keys.en_passant_file[file];
+    }
+
+    if self.side_to_move == Color::Black {
+      hash ^= keys.side_to_move;
+    }
+    hash
+  }
+
   pub fn make_move(&mut self, m:crate::types::Move) -> UndoInfo {
+    let keys = zobrist::keys();
+    let mut hash = self.zobrist_hash;
     let from = moves::from_sq(m);
     let to = moves::to_sq(m);
     let flag = moves::flag(m);
@@ -275,37 +308,60 @@ impl Board {
       old_en_passant: self.en_passant,
       old_halfmove_clock: self.halfmove_clock,
       captured_piece_type: self.piece_type_on(to),
+      old_zobrist_hash: self.zobrist_hash,
     };
 
     let moving_piece = self.piece_type_on(from).unwrap();
 
-    /// captures handling
+    hash ^= keys.side_to_move;
+    if let Some(sq) = self.en_passant {
+      hash ^= keys.en_passant_file[(sq % 8) as usize];
+    }
+
+    hash ^= keys.castling[self.castling_rights as usize];
+
+    // captures handling
     if moves::is_capture(m) {
       if flag == moves::EN_PASSANT_CAPTURE_FLAG {
         let captured_sq = if us == Color::White { to - 8 } else { to + 8 };
         self.remove_piece(PieceType::Pawn, them, captured_sq);
+        hash ^= keys.pieces[PieceType::Pawn as usize][them as usize][captured_sq as usize];
       }else {
         let captured_piece = undo.captured_piece_type.unwrap();
         self.remove_piece(captured_piece, them, to);
+        hash ^= keys.pieces[captured_piece as usize][them as usize][to as usize];
       }
     }
 
     self.move_piece(moving_piece, us, from, to);
+    hash ^= keys.pieces[moving_piece as usize][us as usize][from as usize];
+    hash ^= keys.pieces[moving_piece as usize][us as usize][to as usize];
 
     if moves::is_promotion(m) {
       let promo_piece = moves::promotion_piece(m);
       self.remove_piece(PieceType::Pawn, us, to);
       self.add_piece(promo_piece, us, to);
+      hash ^= keys.pieces[PieceType::Pawn as usize][us as usize][to as usize];
+      hash ^= keys.pieces[promo_piece as usize][us as usize][to as usize];
+
     } else if flag == moves::KING_CASTLE_FLAG {
         let (rook_from, rook_to) = if us == Color::White { (7,5) } else { (63, 61)};
         self.move_piece(PieceType::Rook, us, rook_from, rook_to);
+        hash ^= keys.pieces[PieceType::Rook as usize][us as usize][rook_from as usize];
+        hash ^= keys.pieces[PieceType::Rook as usize][us as usize][rook_to as usize];
+
     } else if flag == moves::QUEEN_CASTLE_FLAG {
-      let (rook_from, rook_to) = if us == Color::White { (0, 3) } else { (56, 59) };
-      self.move_piece(PieceType::Rook, us, rook_from, rook_to);
+        let (rook_from, rook_to) = if us == Color::White { (0, 3) } else { (56, 59) };
+        self.move_piece(PieceType::Rook, us, rook_from, rook_to);
+        hash ^= keys.pieces[PieceType::Rook as usize][us as usize][rook_from as usize];
+        hash ^= keys.pieces[PieceType::Rook as usize][us as usize][rook_to as usize];
+        
     }
 
     self.en_passant = if flag == moves::DOUBLE_PAWN_PUSH_FLAG {
-      Some(if us == Color::White {from + 8} else { from - 8 })
+      let ep_sq = if us == Color::White { from + 8 } else { from - 8 };
+      hash ^= keys.en_passant_file[(ep_sq % 8) as usize]; 
+      Some(ep_sq)
     } else {
       None
     };
@@ -322,14 +378,18 @@ impl Board {
 
     self.castling_rights &= CASTLE_MASK[from as usize];
     self.castling_rights &= CASTLE_MASK[to as usize];
-
+    hash ^= keys.castling[self.castling_rights as usize];
 
     self.side_to_move = them;
+    self.zobrist_hash = hash;
 
     undo
   }
 
   pub fn unmake_move(&mut self, m: Move, undo: UndoInfo) {
+
+    self.zobrist_hash = undo.old_zobrist_hash;
+
     let from = moves::from_sq(m);
     let to = moves::to_sq(m);
     let flag = moves::flag(m);
@@ -465,11 +525,13 @@ mod tests {
     let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
     let mut board = Board::from_fen(fen).unwrap();
     let original_fen = board.to_fen();
+    let original_hash = board.zobrist_hash;
 
     let m = moves::new(36, 26, moves::QUIET_MOVE_FLAG);
     let undo = board.make_move(m);
     board.unmake_move(m, undo);
 
     assert_eq!(original_fen, board.to_fen());
+    assert_eq!(original_hash, board.zobrist_hash);
   }
 }
