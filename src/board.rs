@@ -114,11 +114,101 @@ impl Board {
     board.halfmove_clock = parts[4]
       .parse()
       .map_err(|_| "Invalid FEN: invalid halfmove clock")?;
+
+    board.fullmove_number = parts[5]
+      .parse()
+      .map_err(|_| "Invalid FEN: invalid fullmove number")?;
+    
     Ok(board)
   }
 
   pub fn to_fen(&self) -> String {
-    String::new()
+    let mut fen = String::with_capacity(90);
+
+    for rank in (0..8).rev() {
+      let mut empty_squares = 0;
+      for file in 0..8 {
+        let square = rank * 8 + file;
+        let bit = 1 << square;
+        let mut piece_char = None;
+
+        for pt_idx in 0..6 {
+          if (self.pieces[pt_idx][Color::White as usize] & bit) != 0 {
+            piece_char = Some(match pt_idx.into() {
+              PieceType::Pawn => 'P',
+              PieceType::Knight => 'N',
+              PieceType::Bishop => 'B',
+              PieceType::Rook => 'R',
+              PieceType::Queen => 'Q',
+              PieceType::King => 'K',
+            });
+            break;
+          }
+          if (self.pieces[pt_idx][Color::Black as usize] & bit) != 0 {
+            piece_char = Some(match pt_idx.into() {
+              PieceType::Pawn => 'p',
+              PieceType::Knight => 'n',
+              PieceType::Bishop => 'b',
+              PieceType::Rook => 'r',
+              PieceType::Queen => 'q',
+              PieceType::King => 'k',
+            });
+            break;
+          }
+        }
+        if let Some(pc) = piece_char {
+          if empty_squares > 0 {
+            fen.push_str(&empty_squares.to_string());
+            empty_squares = 0;
+          }
+          fen.push(pc);
+        } else {
+          empty_squares += 1;
+        }
+      }
+      if empty_squares > 0 {
+        fen.push_str(&empty_squares.to_string());
+      }
+      if rank > 0 {
+        fen.push('/');
+      }
+    }
+
+    fen.push(' ');
+    fen.push(match self.side_to_move {
+      Color::White => 'w',
+      Color::Black => 'b',
+    });
+
+    fen.push(' ');
+    let mut castling_str = String::new();
+    if self.castling_rights & 0b0001 != 0 { castling_str.push('K'); }
+    if self.castling_rights & 0b0010 != 0 { castling_str.push('Q'); }
+    if self.castling_rights & 0b0100 != 0 { castling_str.push('k'); }
+    if self.castling_rights & 0b1000 != 0 { castling_str.push('q'); }
+    if castling_str.is_empty() {
+      fen.push('-');
+    } else {
+      fen.push_str(&castling_str);
+    }
+
+    fen.push(' ');
+    if let Some(sq) = self.en_passant {
+      let file = (sq % 8) as u8 + b'a';
+      let rank = (sq / 8) as u8 + b'1';
+      fen.push(file as char);
+      fen.push(rank as char);
+    } else {
+      fen.push('-');
+    }
+
+    fen.push(' ');
+    fen.push_str(&self.halfmove_clock.to_string());
+
+    fen.push(' ');
+    fen.push_str(&self.fullmove_number.to_string());
+
+    fen
   }
 
   pub fn make_move(&mut self, m:crate::types::Move) -> UndoInfo {
@@ -197,6 +287,26 @@ impl Default for Board {
       fullmove_number: 1, 
       zobrist_hash: 0, 
       history: Vec::new(),
+    }
+  }
+}
+
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn fen_round_trip() {
+    let fens = [
+      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+      "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+      "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+    ];
+    for fen_str in fens.iter() {
+      let board = Board::from_fen(fen_str).expect("Failed to parse FEN");
+      assert_eq!(board.to_fen(), *fen_str);
     }
   }
 }
