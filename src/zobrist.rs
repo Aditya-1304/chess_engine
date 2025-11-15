@@ -1,4 +1,3 @@
-use crate::types::{Color, PieceType, Square};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::sync::OnceLock;
 

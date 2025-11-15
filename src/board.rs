@@ -64,7 +64,7 @@ impl Board {
       } else if let Some(digit) = ch.to_digit(10) {
           file += digit as u8;
       } else {
-        if rank < 0 || file > 7 {
+        if file > 7 {
           return Err("Invalid FEN: piece placement format error");
         }
         let square = rank * 8 + file;
