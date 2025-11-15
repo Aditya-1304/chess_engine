@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{moves, types::{Bitboard, Color, PieceType, Square}};
+use crate::{moves::{self, Move}, types::{Bitboard, Color, PieceType, Square}};
 
 pub type ZHash = u64;
 
@@ -30,6 +30,18 @@ const WK_CASTLE: u8 = 0b0001;
 const WQ_CASTLE: u8 = 0b0010;
 const BK_CASTLE: u8 = 0b0100;
 const BQ_CASTLE: u8 = 0b1000;
+
+static CASTLE_MASK: [u8; 64] = [
+    !WQ_CASTLE, 0xFF, 0xFF, 0xFF, !(WK_CASTLE | WQ_CASTLE), 0xFF, 0xFF, !WK_CASTLE, // Rank 1
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               // Rank 2
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               // Rank 3
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               // Rank 4
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               // Rank 5
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               // Rank 6
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                               // Rank 7
+    !BQ_CASTLE, 0xFF, 0xFF, 0xFF, !(BK_CASTLE | BQ_CASTLE), 0xFF, 0xFF, !BK_CASTLE, // Rank 8
+];
+
 
 impl Board {
 
@@ -308,7 +320,8 @@ impl Board {
       self.fullmove_number += 1;
     }
 
-    self.castling_rights &= !( (1 << from) | (1 << to) ).trailing_zeros() as u8;
+    self.castling_rights &= CASTLE_MASK[from as usize];
+    self.castling_rights &= CASTLE_MASK[to as usize];
 
 
     self.side_to_move = them;
@@ -316,9 +329,46 @@ impl Board {
     undo
   }
 
-  pub fn unmake_move(&mut self, undo: UndoInfo) {
+  pub fn unmake_move(&mut self, m: Move, undo: UndoInfo) {
+    let from = moves::from_sq(m);
+    let to = moves::to_sq(m);
+    let flag = moves::flag(m);
+    let them = self.side_to_move;
+    let us = if them == Color::White { Color::Black } else { Color::White };
 
+    self.castling_rights = undo.old_castling_rights;
+    self.en_passant = undo.old_en_passant;
+    self.halfmove_clock = undo.old_halfmove_clock;
+    if us == Color::Black {
+      self.fullmove_number -= 1;
+    }
+    self.side_to_move = us;
+
+    let mut moving_piece = self.piece_type_on(to).unwrap();
+    if moves::is_promotion(m) {
+      self.remove_piece(moving_piece, us, to);
+      self.add_piece(PieceType::Pawn, us, to);
+      moving_piece = PieceType::Pawn;
+    } else if flag == moves::KING_CASTLE_FLAG {
+      let (rook_from, rook_to) = if us == Color::White { (7, 5) } else { (63, 61) };
+      self.move_piece(PieceType::Rook, us, rook_to, rook_from);
+    } else if flag == moves::QUEEN_CASTLE_FLAG {
+      let (rook_from, rook_to) = if us == Color::White { (0, 3) } else { (56, 59) };
+      self.move_piece(PieceType::Rook, us, rook_to, rook_from);
+    }
+    
+    self.move_piece(moving_piece, us, to, from);
+
+    if moves::is_capture(m) {
+      if flag == moves::EN_PASSANT_CAPTURE_FLAG {
+        let capured_sq = if us == Color::White { to - 8 } else { to + 8 };
+        self.add_piece(PieceType::Pawn, them, capured_sq);
+      } else {
+        self.add_piece(undo.captured_piece_type.unwrap(), them, to);
+      }
+    }
   }
+
 }
 
 impl fmt::Display for Board {
@@ -408,5 +458,18 @@ mod tests {
       let board = Board::from_fen(fen_str).expect("Failed to parse FEN");
       assert_eq!(board.to_fen(), *fen_str);
     }
+  }
+
+  #[test]
+  fn make_unmake_move() {
+    let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+    let mut board = Board::from_fen(fen).unwrap();
+    let original_fen = board.to_fen();
+
+    let m = moves::new(36, 26, moves::QUIET_MOVE_FLAG);
+    let undo = board.make_move(m);
+    board.unmake_move(m, undo);
+
+    assert_eq!(original_fen, board.to_fen());
   }
 }
