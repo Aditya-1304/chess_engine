@@ -1,7 +1,8 @@
-use chess_engine::board::{ Board};
+use chess_engine::{board::Board, movegen};
 use std::env;
 
 fn main() {
+    movegen::init();
     let args: Vec<String> = env::args().collect();
      
     if args.len() > 2 && args[1] == "--fen" {

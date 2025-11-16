@@ -431,26 +431,12 @@ impl Board {
     }
   }
 
-  pub fn is_square_attacked(&self, sq: Square, attacker_color: Color) -> bool {
-    let pawn_attacks = movegen::pawn_attacks(if attacker_color == Color::White { Color::Black } else { Color::White }, sq);
-    if (pawn_attacks & self.pieces[PieceType::Pawn as usize][attacker_color as usize]) != 0 {
-      return true;
-    }
-
-    let knight_attacks = movegen::knight_attacks(sq);
-    if (knight_attacks & self.pieces[PieceType::Knight as usize][attacker_color as usize]) != 0 {
-      return true;
-    }
-
-    let king_attacks = movegen::king_attacks(sq);
-    if (king_attacks & self.pieces[PieceType::King as usize][attacker_color as usize]) != 0 {
-      return true;
-    }
-    false
-  }
-
   pub fn generate_pseudo_legal_moves(&self, list: &mut MoveList) {
     movegen::generate_pseudo_legal_moves(self, list);
+  }
+
+  pub fn is_square_attacked(&self, sq: Square, attacker_color: Color) -> bool {
+    movegen::is_square_attacked(self, sq, attacker_color)
   }
 
   pub fn perft(&mut self, depth: u8) -> u64 {
@@ -464,7 +450,13 @@ impl Board {
 
     for &m in move_list.iter() {
       let undo = self.make_move(m);
-      nodes += self.perft(depth - 1);
+
+      let us = if self.side_to_move == Color::White { Color::Black } else { Color::White };
+      let king_sq = self.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
+
+      if !self.is_square_attacked(king_sq, self.side_to_move) {
+        nodes += self.perft(depth - 1);
+      }
       self.unmake_move(m, undo);
     }
     nodes
@@ -546,6 +538,7 @@ impl Default for Board {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::movegen;
 
   #[test]
   fn fen_round_trip() {
@@ -578,18 +571,31 @@ mod tests {
 
   #[test]
   fn perft_startpos() {
+    movegen::init();
     let mut board =
       Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
     assert_eq!(board.perft(1), 20);
     assert_eq!(board.perft(2), 400);
   }
 
-  // #[test]
-  // fn perft_kiwi() {
-  //   let mut board =
-  //     Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
-  //       .unwrap();
-  //   assert_eq!(board.perft(1), 48);
-  //   assert_eq!(board.perft(2), 2039);
-  // }
+  #[test]
+  fn perft_kiwi() {
+    movegen::init();
+    let mut board =
+      Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+        .unwrap();
+    assert_eq!(board.perft(1), 48);
+    assert_eq!(board.perft(2), 2039);
+    assert_eq!(board.perft(3), 97862);
+  }
+
+  #[test]
+  fn perft_position_3() {
+    movegen::init();
+    let mut board =
+      Board::from_fen("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1").unwrap();
+    assert_eq!(board.perft(1), 14);
+    assert_eq!(board.perft(2), 191);
+    assert_eq!(board.perft(3), 2812);
+  }
 }
