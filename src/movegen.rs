@@ -4,6 +4,7 @@ use crate::{
  types::{Bitboard, Color, PieceType, Square}
 };
 use std::sync::OnceLock;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[derive(Clone, Copy)]
 struct Magic {
@@ -383,21 +384,66 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
     pawns &= pawns - 1;
   }
 }
+fn find_magic(sq: Square, mask: Bitboard, shift: u32, is_bishop: bool) -> u64 {
+    let mut rng = StdRng::seed_from_u64(sq as u64 + if is_bishop { 0 } else { 64 });
+    
+    loop {
+        let magic: u64 = rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>();
+        if (magic.wrapping_mul(mask) & 0xFF00000000000000) < 6 { continue; }
 
+        let mut used = vec![0u64; 1 << (64 - shift)];
+        let mut fail = false;
+
+        let relevant_bits = mask.count_ones();
+        let size = 1 << relevant_bits;
+        
+        for i in 0..size {
+            let occupancy = occupancy_from_index(i, mask);
+            let attack = if is_bishop {
+                bishop_attacks_slow(sq, occupancy)
+            } else {
+                rook_attacks_slow(sq, occupancy)
+            };
+            
+            let idx = (occupancy.wrapping_mul(magic) >> shift) as usize;
+            
+            if used[idx] != 0 && used[idx] != attack {
+                fail = true;
+                break;
+            }
+            used[idx] = attack;
+        }
+        
+        if !fail {
+            return magic;
+        }
+    }
+}
 
 fn init_bishop_magics() -> [Magic; 64] {
     let mut bishop_attacks = Vec::new();
     let mut attacks_info = Vec::new();
+    let mut magics_array = [0u64; 64];
+
     for sq in 0..64 {
         let mask = bishop_mask(sq);
         let relevant_bits = mask.count_ones();
+        let shift = 64 - relevant_bits;
+        
+        let magic = find_magic(sq, mask, shift, true);
+        magics_array[sq as usize] = magic;
+
         let table_size = 1 << relevant_bits;
         let start_index = bishop_attacks.len();
         attacks_info.push((start_index, table_size));
+        
+        bishop_attacks.resize(start_index + table_size, 0);
 
         for i in 0..table_size {
             let occupancy = occupancy_from_index(i, mask);
-            bishop_attacks.push(bishop_attacks_slow(sq, occupancy));
+            let attack = bishop_attacks_slow(sq, occupancy);
+            let magic_index = ((occupancy.wrapping_mul(magic)) >> shift) as usize;
+            bishop_attacks[start_index + magic_index] = attack;
         }
     }
 
@@ -415,7 +461,7 @@ fn init_bishop_magics() -> [Magic; 64] {
         let (start, len) = attacks_info[sq as usize];
         magics[sq as usize] = Magic {
             mask,
-            magic: BISHOP_MAGICS[sq as usize],
+            magic: magics_array[sq as usize],
             attacks: &static_attacks[start..start + len],
             shift: 64 - relevant_bits,
         };
@@ -426,16 +472,27 @@ fn init_bishop_magics() -> [Magic; 64] {
 fn init_rook_magics() -> [Magic; 64] {
     let mut rook_attacks = Vec::new();
     let mut attacks_info = Vec::new();
+    let mut magics_array = [0u64; 64];
+
     for sq in 0..64 {
         let mask = rook_mask(sq);
         let relevant_bits = mask.count_ones();
+        let shift = 64 - relevant_bits;
+        
+        let magic = find_magic(sq, mask, shift, false);
+        magics_array[sq as usize] = magic;
+
         let table_size = 1 << relevant_bits;
         let start_index = rook_attacks.len();
         attacks_info.push((start_index, table_size));
 
+        rook_attacks.resize(start_index + table_size, 0);
+
         for i in 0..table_size {
             let occupancy = occupancy_from_index(i, mask);
-            rook_attacks.push(rook_attacks_slow(sq, occupancy));
+            let attack = rook_attacks_slow(sq, occupancy);
+            let magic_index = ((occupancy.wrapping_mul(magic)) >> shift) as usize;
+            rook_attacks[start_index + magic_index] = attack;
         }
     }
 
@@ -453,7 +510,7 @@ fn init_rook_magics() -> [Magic; 64] {
         let (start, len) = attacks_info[sq as usize];
         magics[sq as usize] = Magic {
             mask,
-            magic: ROOK_MAGICS[sq as usize],
+            magic: magics_array[sq as usize],
             attacks: &static_attacks[start..start + len],
             shift: 64 - relevant_bits,
         };
@@ -464,93 +521,73 @@ fn init_rook_magics() -> [Magic; 64] {
 fn occupancy_from_index(index: usize, mut mask: Bitboard) -> Bitboard {
   let mut occupancy = 0;
   for i in 0..mask.count_ones() {
-    let sq = mask.trailing_zeros();
-    mask &= mask - 1;
-    if (index >> i) & 1 != 0 {
-      occupancy |= 1 << sq;
+    let square = mask.trailing_zeros();
+    mask &= !(1 << square);
+    if (index & (1 << i)) != 0 {
+      occupancy |= 1 << square;
     }
   }
   occupancy
 }
+
 fn bishop_mask(sq: Square) -> Bitboard {
     let mut result = 0;
-    let r = sq / 8;
-    let f = sq % 8;
+    let r = (sq / 8) as i8;
+    let f = (sq % 8) as i8;
 
-    // Up-right
-    for i in 1.. {
-        if r + i > 6 || f + i > 6 { break; } // Stop *one* square before edge
-        result |= 1 << ((r + i) * 8 + (f + i));
-    }
-    // Up-left
-    for i in 1.. {
-        if r + i > 6 || f < i || f - i < 1 { break; } // Stop *one* square before edge
-        result |= 1 << ((r + i) * 8 + (f - i));
-    }
-    // Down-right
-    for i in 1.. {
-        if r < i || r - i < 1 || f + i > 6 { break; } // Stop *one* square before edge
-        result |= 1 << ((r - i) * 8 + (f + i));
-    }
-    // Down-left
-    for i in 1.. {
-        if r < i || r - i < 1 || f < i || f - i < 1 { break; } // Stop *one* square before edge
-        result |= 1 << ((r - i) * 8 + (f - i));
+    for (dr, df) in &[(-1, -1), (-1, 1), (1, -1), (1, 1)] {
+        let mut nr = r + dr;
+        let mut nf = f + df;
+        // Edges are not part of the occupancy mask for magics
+        while nr > 0 && nr < 7 && nf > 0 && nf < 7 {
+            result |= 1 << (nr * 8 + nf);
+            nr += dr;
+            nf += df;
+        }
     }
     result
 }
 
-// ADD THIS CORRECT VERSION
 fn rook_mask(sq: Square) -> Bitboard {
     let mut result = 0;
-    let r = sq / 8;
-    let f = sq % 8;
+    let r = (sq / 8) as i8;
+    let f = (sq % 8) as i8;
 
-    // Right
-    for i in (f + 1)..7 { // Loop from f+1 up to (but not including) 7
-        result |= 1 << (r * 8 + i);
+    // North
+    for nr in (r + 1)..7 {
+        result |= 1 << (nr * 8 + f);
     }
-    // Left
-    for i in 1..f { // Loop from 1 up to (but not including) f
-        result |= 1 << (r * 8 + i);
+    // South
+    for nr in 1..r {
+        result |= 1 << (nr * 8 + f);
     }
-    // Up
-    for i in (r + 1)..7 { // Loop from r+1 up to (but not including) 7
-        result |= 1 << (i * 8 + f);
+    // East
+    for nf in (f + 1)..7 {
+        result |= 1 << (r * 8 + nf);
     }
-    // Down
-    for i in 1..r { // Loop from 1 up to (but not including) r
-        result |= 1 << (i * 8 + f);
+    // West
+    for nf in 1..f {
+        result |= 1 << (r * 8 + nf);
     }
     result
 }
+
 fn bishop_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
     let mut attacks = 0;
-    let dirs = [7, 9, -7, -9]; // up-left, up-right, down-left, down-right
+    let r = (sq / 8) as i8;
+    let f = (sq % 8) as i8;
 
-    for &dir in &dirs {
-        let mut s = sq as i8;
-        loop {
-            let prev_s = s;
-            s += dir;
-
-            // Check for out-of-bounds
-            if s < 0 || s >= 64 {
+    for (dr, df) in &[(-1, -1), (-1, 1), (1, -1), (1, 1)] {
+        let mut nr = r + dr;
+        let mut nf = f + df;
+        while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            let bit = 1 << (nr * 8 + nf);
+            attacks |= bit;
+            if (occupancy & bit) != 0 {
                 break;
             }
-
-            // Check for wrap-around: the file distance between the previous
-            // and current square must be exactly 1 for a diagonal move.
-            let prev_file = prev_s % 8;
-            let new_file = s % 8;
-            if (new_file - prev_file).abs() != 1 {
-                break;
-            }
-
-            attacks |= 1 << s;
-            if (1 << s) & occupancy != 0 {
-                break; // Stop at first blocker
-            }
+            nr += dr;
+            nf += df;
         }
     }
     attacks
@@ -558,36 +595,20 @@ fn bishop_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
 
 fn rook_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
     let mut attacks = 0;
-    let dirs = [1, -1, 8, -8]; // right, left, up, down
-    let r = sq / 8; // The *original* rank
-    let f = sq % 8; // The *original* file
+    let r = (sq / 8) as i8;
+    let f = (sq % 8) as i8;
 
-    for &dir in &dirs {
-        let mut s = sq as i8;
-        loop {
-            s += dir;
-
-            // 1. Check for out-of-bounds
-            if s < 0 || s >= 64 {
+    for (dr, df) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let mut nr = r + dr;
+        let mut nf = f + df;
+        while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            let bit = 1 << (nr * 8 + nf);
+            attacks |= bit;
+            if (occupancy & bit) != 0 {
                 break;
             }
-
-            let new_sq = s as Square;
-            let nr = new_sq / 8; // The new rank
-            let nf = new_sq % 8; // The new file
-
-            // 2. Check for wrap-around (compare new rank/file to *original*)
-            if (dir == 1 || dir == -1) && nr != r { // Horizontal move changed rank
-                break;
-            }
-            if (dir == 8 || dir == -8) && nf != f { // Vertical move changed file
-                break;
-            }
-
-            attacks |= 1 << new_sq;
-            if (1 << new_sq) & occupancy != 0 {
-                break; // Stop at first blocker
-            }
+            nr += dr;
+            nf += df;
         }
     }
     attacks
