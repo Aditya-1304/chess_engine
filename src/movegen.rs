@@ -4,7 +4,6 @@ use crate::{
  types::{Bitboard, Color, PieceType, Square}
 };
 use std::sync::OnceLock;
-use rand::{rngs::StdRng, Rng, SeedableRng};
 
 #[derive(Clone, Copy)]
 struct Magic {
@@ -384,54 +383,18 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
     pawns &= pawns - 1;
   }
 }
-fn find_magic(sq: Square, mask: Bitboard, shift: u32, is_bishop: bool) -> u64 {
-    let mut rng = StdRng::seed_from_u64(sq as u64 + if is_bishop { 0 } else { 64 });
-    
-    loop {
-        let magic: u64 = rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>();
-        if (magic.wrapping_mul(mask) & 0xFF00000000000000) < 6 { continue; }
 
-        let mut used = vec![0u64; 1 << (64 - shift)];
-        let mut fail = false;
-
-        let relevant_bits = mask.count_ones();
-        let size = 1 << relevant_bits;
-        
-        for i in 0..size {
-            let occupancy = occupancy_from_index(i, mask);
-            let attack = if is_bishop {
-                bishop_attacks_slow(sq, occupancy)
-            } else {
-                rook_attacks_slow(sq, occupancy)
-            };
-            
-            let idx = (occupancy.wrapping_mul(magic) >> shift) as usize;
-            
-            if used[idx] != 0 && used[idx] != attack {
-                fail = true;
-                break;
-            }
-            used[idx] = attack;
-        }
-        
-        if !fail {
-            return magic;
-        }
-    }
-}
 
 fn init_bishop_magics() -> [Magic; 64] {
     let mut bishop_attacks = Vec::new();
     let mut attacks_info = Vec::new();
-    let mut magics_array = [0u64; 64];
 
     for sq in 0..64 {
         let mask = bishop_mask(sq);
         let relevant_bits = mask.count_ones();
         let shift = 64 - relevant_bits;
         
-        let magic = find_magic(sq, mask, shift, true);
-        magics_array[sq as usize] = magic;
+        let magic = BISHOP_MAGICS[sq as usize];
 
         let table_size = 1 << relevant_bits;
         let start_index = bishop_attacks.len();
@@ -461,7 +424,7 @@ fn init_bishop_magics() -> [Magic; 64] {
         let (start, len) = attacks_info[sq as usize];
         magics[sq as usize] = Magic {
             mask,
-            magic: magics_array[sq as usize],
+            magic: BISHOP_MAGICS[sq as usize],
             attacks: &static_attacks[start..start + len],
             shift: 64 - relevant_bits,
         };
@@ -472,15 +435,13 @@ fn init_bishop_magics() -> [Magic; 64] {
 fn init_rook_magics() -> [Magic; 64] {
     let mut rook_attacks = Vec::new();
     let mut attacks_info = Vec::new();
-    let mut magics_array = [0u64; 64];
 
     for sq in 0..64 {
         let mask = rook_mask(sq);
         let relevant_bits = mask.count_ones();
         let shift = 64 - relevant_bits;
         
-        let magic = find_magic(sq, mask, shift, false);
-        magics_array[sq as usize] = magic;
+        let magic = ROOK_MAGICS[sq as usize];
 
         let table_size = 1 << relevant_bits;
         let start_index = rook_attacks.len();
@@ -510,13 +471,14 @@ fn init_rook_magics() -> [Magic; 64] {
         let (start, len) = attacks_info[sq as usize];
         magics[sq as usize] = Magic {
             mask,
-            magic: magics_array[sq as usize],
+            magic: ROOK_MAGICS[sq as usize],
             attacks: &static_attacks[start..start + len],
             shift: 64 - relevant_bits,
         };
     }
     magics
 }
+
 
 fn occupancy_from_index(index: usize, mut mask: Bitboard) -> Bitboard {
   let mut occupancy = 0;
@@ -615,134 +577,135 @@ fn rook_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
 }
 
 static BISHOP_MAGICS: [u64; 64] = [
-    0x400408448408400,
-    0x2004208a004208,
-    0x10190041080202,
-    0x10806080400,
-    0x204000212008,
-    0x1000810040402,
-    0x404000804080,
-    0x4080200000,
-    0x80800400080400,
-    0x401004040808,
-    0x20080104010,
-    0x80004010002,
-    0x20002008080,
-    0x8080040200,
-    0x4000802080,
-    0x2100000,
-    0x800080400,
-    0x8000808040,
-    0x1000050040,
-    0x400000208,
-    0x8000400,
-    0x400080,
-    0x2000,
-    0x80,
-    0x804010020,
-    0x40100080080,
-    0x200800400,
-    0x8008040,
-    0x8000,
-    0x80,
-    0x40,
-    0,
-    0x402000100,
-    0x20100004,
-    0x1008020,
-    0x8040,
-    0,
-    0,
-    0,
-    0,
-    0x800080100,
-    0x400040080,
-    0x20002004,
-    0x8008,
-    0,
-    0,
-    0,
-    0,
-    0x400000080,
-    0x200000040,
-    0x100000020,
-    0x8000000,
-    0,
-    0,
-    0,
-    0,
-    0x8000020400,
-    0x4000010200,
-    0x2000008100,
-    0x1000004080,
-    0x8000002040,
-    0x4000001020,
-    0x2000000810,
-    0x1000000400,
+    0x40440080810102,
+    0x4831011a0a001e,
+    0x206800840080a050,
+    0x4040080008200,
+    0x8484011850200,
+    0x13c300828004800,
+    0x1000808818c12488,
+    0x4200809148200408,
+    0x82098088100,
+    0x108002022c010200,
+    0x882800c08880,
+    0xaa4081008000,
+    0x200841c20802000,
+    0x20020104204001,
+    0xc1000c01093050e1,
+    0x600360342082440,
+    0x1002090a080818,
+    0x2180410021208,
+    0x4108000102040054,
+    0x1cc8000404208c02,
+    0x4001211200008,
+    0x2924084200920810,
+    0x400a20404010815,
+    0x380400200421808,
+    0x1520082810100104,
+    0x21380210901100,
+    0x6080820010041090,
+    0x480004021020,
+    0x9000840022020202,
+    0x4024460013010302,
+    0x6204008200a208,
+    0x618020010c0600,
+    0x26086020c42000,
+    0x888029000028400,
+    0x840201000800d0,
+    0x420600800010104,
+    0x40010100004440,
+    0x6810245200104104,
+    0x1220081062801,
+    0x30c61020000a081,
+    0x8012c2082000c046,
+    0x214240208000200,
+    0x1202820082084040,
+    0x202013020800,
+    0x840080100410407,
+    0x5200283000082,
+    0x44810204000200,
+    0x5810018091140281,
+    0xc140402184050,
+    0x8001118801084002,
+    0x8003908080418,
+    0x408000406088008c,
+    0x410001002020118,
+    0x14231622020088,
+    0x1020d181020060,
+    0x4220041340450100,
+    0x4002008401411000,
+    0x2080010101108200,
+    0xac49000020841000,
+    0x9040040113840401,
+    0x5010c40128a00,
+    0x11801220090100,
+    0x10428300c0080,
+    0xc028814408020021,
 ];
+
 static ROOK_MAGICS: [u64; 64] = [
-    0x8a80104000800020,
-    0x140002000100040,
-    0x28000100004020,
-    0x100008000200040,
-    0x20002001008040,
-    0x1000400020080,
-    0x200040080100,
-    0x28008004002000,
-    0x8000800800400,
-    0x10000200100,
-    0x20000100040,
-    0x8000800200,
-    0x4000100008,
-    0x8000400,
-    0x400080,
-    0x80,
-    0x8000808004000,
-    0x1004000802000,
-    0x208004000100,
-    0x1000800200040,
-    0x200040010008,
-    0x8000800040,
-    0x1000800,
-    0x2000,
-    0x808008004000,
-    0x10200100080,
-    0x401000400,
-    0x80080020,
-    0x400010,
-    0x800,
-    0x40,
-    0,
-    0x808004002000,
-    0x10100080040,
-    0x400800200,
-    0x80040010,
-    0x20008,
-    0x400,
-    0x20,
-    0,
-    0x808002001000,
-    0x10080040020,
-    0x40040020,
-    0x800200,
-    0x100,
-    0x2,
-    0,
-    0,
-    0x40800800400,
-    0x8040040020,
-    0x20200200,
-    0x40100,
-    0x8,
-    0,
-    0,
-    0,
-    0x4004080200800,
-    0x80020800400,
-    0x1001040020,
-    0x2000400,
-    0x800,
-    0,
-    0,
-    0,
+    0x4680002330804004,
+    0x100106040008500,
+    0x80200188100081,
+    0x208010000e802800,
+    0x22000a0120045008,
+    0x6100040081002802,
+    0x80020000801100,
+    0x118008688000c100,
+    0x40800a60814004,
+    0x3000808040002000,
+    0x91007041002000,
+    0x2001000900201001,
+    0xa001000500100800,
+    0x11020008a200300c,
+    0x401006600210004,
+    0x8402000043042082,
+    0x2004208002824002,
+    0x1196808040002000,
+    0x30008020008131,
+    0x4900220042000810,
+    0x1008010005001810,
+    0x4400808002000401,
+    0x802a010100040200,
+    0x220004440081,
+    0x1804410100218000,
+    0x8400a00040045000,
+    0x62001c040300800,
+    0x1c01002100081000,
+    0x80c008080080086,
+    0x10060002002490c8,
+    0x80d0080400020110,
+    0x500800080004100,
+    0x1408800443002302,
+    0x21a0003000c00140,
+    0x200088801000,
+    0x9212100080800800,
+    0xa002052001488,
+    0x114810c00800200,
+    0x400200a302000804,
+    0x401028042000504,
+    0x6084822040108000,
+    0x460008040008030,
+    0x8001001020050040,
+    0x128005000818029,
+    0x111000408010010,
+    0x400100080401000e,
+    0xb05000600090004,
+    0x1060010448820004,
+    0x4080118040002080,
+    0x5000e001400140,
+    0x9880100020028080,
+    0x400100008048180,
+    0x24900101c080100,
+    0x8028040042008080,
+    0x2021100288010400,
+    0x8100144400930200,
+    0x8800401025008009,
+    0x50110200244086,
+    0x400b02004400901,
+    0x2600408100101,
+    0x22000820055002,
+    0x192001001044802,
+    0x1089000400860001,
+    0x4100089020c201,
 ];
