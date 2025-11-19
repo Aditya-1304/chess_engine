@@ -6,8 +6,12 @@ use crate::{
     types::{Color, PieceType},
 };
 use std::time::Instant;
+
+
 const INF: i32 = 50000;
 pub const MATE_SCORE: i32 = 49000;
+
+
 pub struct Searcher {
     pub nodes: u64,
     pub start_time: Instant,
@@ -15,6 +19,8 @@ pub struct Searcher {
     pub stop: bool,
     pub tt: TranspositionTable,
 }
+
+
 impl Searcher {
     pub fn new() -> Self {
         Self {
@@ -25,6 +31,7 @@ impl Searcher {
             tt: TranspositionTable::new(64), // 64MB default
         }
     }
+
     pub fn search(&mut self, board: &mut Board, depth: u8) -> (i32, Option<Move>) {
         self.nodes = 0;
         self.start_time = Instant::now();
@@ -36,7 +43,7 @@ impl Searcher {
         let mut score = 0;
         // Iterative Deepening
         for d in 1..=depth {
-            let (s, m) = self.negamax(board, d, -INF, INF);
+            let (s, m) = self.negamax(board, d, 0, -INF, INF);
             if self.stop {
                 break;
             }
@@ -62,53 +69,67 @@ impl Searcher {
         }
         (score, best_move)
     }
+
+
     fn negamax(
         &mut self,
         board: &mut Board,
         depth: u8,
+        ply: i32,
         mut alpha: i32,
         beta: i32,
     ) -> (i32, Option<Move>) {
+
         if self.nodes & 2047 == 0 {
             if self.start_time.elapsed().as_millis() > self.time_limit_ms {
                 self.stop = true;
             }
         }
+
         if self.stop {
             return (0, None);
         }
+
         self.nodes += 1;
         // TT Probe
         let alpha_orig = alpha;
         let mut tt_move = None;
+
         if let Some(entry) = self.tt.probe(board.zobrist_hash) {
             if entry.depth >= depth {
+                let tt_score = score_from_tt(entry.score, ply);
                 match entry.flag {
-                    TTFlag::Exact => return (entry.score, entry.move_best),
+                    TTFlag::Exact => return (tt_score, entry.move_best),
                     TTFlag::Beta => {
-                        if entry.score >= beta {
-                            return (entry.score, entry.move_best);
+                        if tt_score >= beta {
+                            return (tt_score, entry.move_best);
                         }
                     }
+
                     TTFlag::Alpha => {
                         if entry.score <= alpha {
-                            return (entry.score, entry.move_best);
+                            return (tt_score, entry.move_best);
                         }
                     }
                 }
             }
             tt_move = entry.move_best;
         }
+
         if depth == 0 {
             return (self.quiescence(board, alpha, beta), None);
         }
+
         let mut move_list = MoveList::new();
         board.generate_pseudo_legal_moves(&mut move_list);
+
         let mut best_score = -INF;
         let mut best_move = None;
         let mut legal_moves = 0;
+
         for i in 0..move_list.len() {
             self.pick_move(&mut move_list, i, board, tt_move);
+
             let m = move_list.iter().nth(i).unwrap().clone();
             let undo = board.make_move(m);
             let us = if board.side_to_move == Color::White {
@@ -116,14 +137,19 @@ impl Searcher {
             } else {
                 Color::White
             };
+            
             let king_sq =
                 board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+                
             if board.is_square_attacked(king_sq, board.side_to_move) {
                 board.unmake_move(m, undo);
                 continue;
             }
+
             legal_moves += 1;
-            let (score, _) = self.negamax(board, depth - 1, -beta, -alpha);
+
+            let (score, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
+
             let score = -score;
             board.unmake_move(m, undo);
             if self.stop {
@@ -141,6 +167,7 @@ impl Searcher {
                 break;
             }
         }
+
         if legal_moves == 0 {
             let us = board.side_to_move;
             let king_sq =
@@ -151,11 +178,12 @@ impl Searcher {
                 Color::White
             };
             if board.is_square_attacked(king_sq, them) {
-                return (-MATE_SCORE + (depth as i32), None);
+                return (-MATE_SCORE + ply, None);
             } else {
                 return (0, None);
             }
         }
+
         // TT Store
         let flag = if best_score <= alpha_orig {
             TTFlag::Alpha
@@ -164,10 +192,14 @@ impl Searcher {
         } else {
             TTFlag::Exact
         };
+
+        let tt_score = score_to_tt(best_score, ply);
         self.tt
-            .store(board.zobrist_hash, best_move, best_score, depth, flag);
+            .store(board.zobrist_hash, best_move, tt_score, depth, flag);
         (best_score, best_move)
     }
+
+
     fn quiescence(&mut self, board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
         if self.nodes & 2047 == 0 {
             if self.start_time.elapsed().as_millis() > self.time_limit_ms {
@@ -185,6 +217,7 @@ impl Searcher {
         if stand_pat > alpha {
             alpha = stand_pat;
         }
+
         let mut move_list = MoveList::new();
         movegen::generate_captures(board, &mut move_list);
         
@@ -197,23 +230,27 @@ impl Searcher {
             } else {
                 Color::White
             };
+
             let king_sq =
                 board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
             if board.is_square_attacked(king_sq, board.side_to_move) {
                 board.unmake_move(m, undo);
                 continue;
             }
+
             let score = -self.quiescence(board, -beta, -alpha);
             board.unmake_move(m, undo);
             if score >= beta {
                 return beta;
             }
+
             if score > alpha {
                 alpha = score;
             }
         }
         alpha
     }
+
     fn pick_move(
         &self,
         move_list: &mut MoveList,
@@ -239,6 +276,7 @@ impl Searcher {
         }
         moves.swap(start_index, best_idx);
     }
+
     fn get_mvv_lva(&self, m: Move, board: &Board) -> i32 {
         let to = moves::to_sq(m);
         let from = moves::from_sq(m);
@@ -262,4 +300,26 @@ impl Searcher {
         };
         10 * vv - av + 10000
     }
+
+    
 }
+
+fn score_to_tt(score: i32, ply: i32) -> i32 {
+        if score > 48000 {
+            score + ply
+        } else if score < -48000 {
+            score - ply
+        } else {
+            score
+        }
+    }
+
+    fn score_from_tt(score: i32, ply: i32) -> i32 {
+        if score > 48000 {
+            score - ply
+        } else if score < -48000 {
+            score + ply
+        } else {
+            score
+        }
+    }
