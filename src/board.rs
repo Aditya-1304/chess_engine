@@ -237,7 +237,7 @@ impl Board {
     fen
   }
 
-  fn piece_type_on(&self, sq: Square) -> Option<PieceType> {
+  pub fn piece_type_on(&self, sq: Square) -> Option<PieceType> {
     let bit = 1 << sq;
     for pt_idx in 0..6 {
       if (self.pieces[pt_idx][0] | self.pieces[pt_idx][1]) & bit != 0 {

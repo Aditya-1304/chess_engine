@@ -709,3 +709,117 @@ static ROOK_MAGICS: [u64; 64] = [
     0x1089000400860001,
     0x4100089020c201,
 ];
+
+
+pub fn generate_capture(board: &Board, list: &mut MoveList) {
+  generate_pawn_captures(board, list);
+  generate_knight_captures(board, list);
+  generate_king_captures(board, list);
+  generate_sliding_captures(board, list);
+}
+
+fn generate_pawn_captures(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let them = if us == Color::White { Color::Black } else { Color::White };
+  let our_pawns = board.pieces[PieceType::Pawn as usize][us as usize];
+  let their_pieces = board.occupancy[them as usize];
+
+  let rank_7 = if us == Color::White {
+     0xFF000000000000u64
+  } else {
+    0xFF00u64
+  };
+
+  let mut pawns = our_pawns;
+  while pawns != 0 {
+    let from_sq = pawns.trailing_zeros() as Square;
+    let from_bb = 1 << from_sq;
+
+    let mut attacks = PAWN_ATTACKS[us as usize][from_sq as usize] & their_pieces;
+    while attacks != 0 {
+      let to_sq = attacks.trailing_zeros() as Square;
+      if (from_bb & rank_7) !=0 {
+        list.push(moves::new(from_sq, to_sq, moves::QUEEN_PROMOTION_CAPTURE_FLAG));
+        list.push(moves::new(from_sq, to_sq, moves::ROOK_PROMOTION_CAPTURE_FLAG));
+        list.push(moves::new(from_sq, to_sq, moves::BISHOP_PROMOTION_CAPTURE_FLAG));
+        list.push(moves::new(from_sq, to_sq, moves::KNIGHT_PROMOTION_CAPTURE_FLAG));
+      } else {
+        list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+      }
+      attacks &= attacks - 1;
+    }
+
+    if let Some(ep_sq) = board.en_passant {
+      if PAWN_ATTACKS[us as usize][from_sq as usize] & (1 << ep_sq) != 0 {
+        list.push(moves::new(from_sq, ep_sq, moves::EN_PASSANT_CAPTURE_FLAG));
+      }
+    }
+
+    pawns &= pawns - 1;
+  }
+}
+
+fn generate_knight_captures(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
+  let mut knights = board.pieces[PieceType::Knight as usize][us as usize];
+
+  while knights != 0 {
+    let from_sq = knights.trailing_zeros() as Square;
+    let attacks = KNIGHT_ATTACKS[from_sq as usize];
+    let mut captures = attacks & their_pieces;
+    
+    while captures != 0 {
+      let to_sq = captures.trailing_zeros() as Square;
+      list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+      captures &= captures - 1;
+    }
+    knights &= knights - 1;
+  }
+}
+
+fn generate_king_captures(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
+  let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
+
+  let mut attacks = KING_ATTACKS[king_sq as usize] & their_pieces;
+  while attacks != 0 {
+    let to_sq = attacks.trailing_zeros() as Square;
+    list.push(moves::new(king_sq, to_sq, moves::CAPTURE_FLAG));
+    attacks &= attacks - 1;
+  }
+}
+
+fn generate_sliding_captures(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let our_pieces = board.occupancy[us as usize];
+  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
+  let all_pieces = our_pieces | their_pieces;
+
+  let mut bishops = board.pieces[PieceType::Bishop as usize][us as usize]
+    | board.pieces[PieceType::Queen as usize][us as usize];
+  while bishops != 0 {
+    let from_sq = bishops.trailing_zeros() as Square;
+    let attacks = get_bishop_attacks(from_sq, all_pieces) & their_pieces;
+    add_sliding_captures(from_sq, attacks, list);
+    bishops &= bishops - 1;
+  }
+
+  let mut rooks = board.pieces[PieceType::Rook as usize][us as usize]
+    | board.pieces[PieceType::Queen as usize][us as usize];
+  while rooks != 0 {
+    let from_sq = rooks.trailing_zeros() as Square;
+    let attacks = get_rook_attacks(from_sq, all_pieces) & their_pieces;
+    add_sliding_captures(from_sq, attacks, list);
+    rooks &= rooks - 1;
+  }
+}
+
+fn add_sliding_captures(from_sq: Square, mut captures: Bitboard, list: &mut MoveList) {
+  while captures != 0 {
+    let to_sq = captures.trailing_zeros() as Square;
+    list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+    captures &= captures - 1;
+  }
+}

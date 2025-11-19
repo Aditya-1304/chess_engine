@@ -85,4 +85,8 @@ impl MoveList {
   pub fn iter(&self) -> std::slice::Iter<'_,Move> {
     self.moves[..self.count].iter()
   }
+
+  pub fn as_mut_slice(&mut self) -> &mut [Move] {
+    &mut self.moves[..self.count]
+  }
 }
