@@ -3,3 +3,4 @@ pub mod types;
 pub mod moves;
 pub mod zobrist;
 pub mod movegen;
+pub mod eval;
