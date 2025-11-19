@@ -711,7 +711,7 @@ static ROOK_MAGICS: [u64; 64] = [
 ];
 
 
-pub fn generate_capture(board: &Board, list: &mut MoveList) {
+pub fn generate_captures(board: &Board, list: &mut MoveList) {
   generate_pawn_captures(board, list);
   generate_knight_captures(board, list);
   generate_king_captures(board, list);

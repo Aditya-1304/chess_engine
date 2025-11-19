@@ -4,6 +4,7 @@ use chess_engine::{
     search::Searcher,
     moves::{self, Move},
     types::{PieceType},
+    uci,
 };
 use std::env;
 use std::time::Instant;
@@ -13,13 +14,14 @@ const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 
 fn main() {
     movegen::init();
     let args: Vec<String> = env::args().collect();
-
     if args.len() < 2 {
-        print_help();
+        uci::main_loop();
         return;
     }
-
     match args[1].as_str() {
+        "uci" => {
+            uci::main_loop();
+        }
         "--fen" => {
             if args.len() > 2 {
                 let fen = &args[2];

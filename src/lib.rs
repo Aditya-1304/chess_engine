@@ -5,3 +5,5 @@ pub mod zobrist;
 pub mod movegen;
 pub mod eval;
 pub mod search;
+pub mod tt;
+pub mod uci;
