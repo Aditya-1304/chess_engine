@@ -1,9 +1,5 @@
 use crate::{
-    board::Board,
-    eval, movegen,
-    moves::{self, Move, MoveList},
-    tt::{TTFlag, TranspositionTable},
-    types::{Color, PieceType},
+    board::Board, book::OpeningBook, eval, movegen, moves::{self, Move, MoveList}, tt::{TTFlag, TranspositionTable}, types::{Color, PieceType}
 };
 use std::time::Instant;
 
@@ -18,6 +14,7 @@ pub struct Searcher {
     pub time_limit_ms: u128,
     pub stop: bool,
     pub tt: TranspositionTable,
+    pub book: OpeningBook,
 }
 
 
@@ -29,6 +26,7 @@ impl Searcher {
             time_limit_ms: 0,
             stop: false,
             tt: TranspositionTable::new(64), // 64MB default
+            book: OpeningBook::new("book.bin")
         }
     }
 
@@ -41,6 +39,10 @@ impl Searcher {
         }
         let mut best_move = None;
         let mut score = 0;
+        if let Some(book_move) = self.book.get_move(board.zobrist_hash) {
+            println!("bestmove {}", format_move(book_move));
+            return (0, Some(book_move));
+        }
         // Iterative Deepening
         for d in 1..=depth {
             let (s, m) = self.negamax(board, d, 0, -INF, INF);
