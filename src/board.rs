@@ -462,6 +462,23 @@ impl Board {
     nodes
   }
 
+  pub fn is_repetition(&self) -> bool {
+    let mut count = 0;
+    for i in (0..self.history.len()).rev() {
+      let undo = &self.history[i];
+
+      if undo.old_halfmove_clock == 0 {
+        break;
+      }
+
+      if undo.old_zobrist_hash == self.zobrist_hash {
+        count += 1;
+      }
+    }
+
+    count >= 1
+  }
+
 }
 
 impl fmt::Display for Board {

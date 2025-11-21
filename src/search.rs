@@ -80,6 +80,8 @@ impl Searcher {
         beta: i32,
     ) -> (i32, Option<Move>) {
 
+        const CONTEMPT: i32 = 50;
+
         if self.nodes & 2047 == 0 {
             if self.start_time.elapsed().as_millis() > self.time_limit_ms {
                 self.stop = true;
@@ -88,6 +90,10 @@ impl Searcher {
 
         if self.stop {
             return (0, None);
+        }
+
+        if ply > 0 && (board.halfmove_clock >= 100 || board.is_repetition()) {
+            return (-CONTEMPT, None);
         }
 
         self.nodes += 1;
