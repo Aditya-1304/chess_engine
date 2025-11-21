@@ -26,6 +26,23 @@ impl Searcher {
         } else {
             println!("info string Warning: book.bin not found");
         }
+
+        let keys = crate::zobrist::keys();
+        println!("--- DEBUG ZOBRIST KEYS ---");
+        // 1. Check the first key (White Pawn on A1) - Should match POLYGOT_RANDOM[0]
+        // A1 is square 0. White is 0. Pawn is 0.
+        println!("White Pawn A1 (Index 0):   {:016x}", keys.pieces[0][0][0]);
+        
+        // 2. Check the last piece key (Black King on H8) - Should match POLYGOT_RANDOM[767]
+        // H8 is 63. Black is 1. King is 5.
+        // Offset = 64 * (2 * 5 + 1) = 704. 704 + 63 = 767.
+        println!("Black King H8 (Index 767): {:016x}", keys.pieces[5][1][63]);
+        
+        // 3. Check Castling Key (White King Side) - Should match POLYGOT_RANDOM[768]
+        // Castling right 1 (WK)
+        println!("Castle WK (Index 768):     {:016x}", keys.castling[1]);
+        
+        println!("--------------------------");
         Self {
             nodes: 0,
             start_time: Instant::now(),
@@ -45,6 +62,7 @@ impl Searcher {
         }
         let mut best_move = None;
         let mut score = 0;
+        println!("info string Zobrist Hash: {:x}", board.zobrist_hash);
         if let Some(book_move) = self.book.get_move(board.zobrist_hash) {
             let mut move_list = MoveList::new();
             board.generate_pseudo_legal_moves(&mut move_list);

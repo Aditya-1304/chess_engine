@@ -286,8 +286,15 @@ impl Board {
     hash ^= keys.castling[self.castling_rights as usize];
 
     if let Some(sq) = self.en_passant {
-      let file = (sq % 8) as usize;
-      hash ^= keys.en_passant_file[file];
+      let us = self.side_to_move;
+      let our_pawns = self.pieces[PieceType::Pawn as usize][us as usize];
+      let them = if us == Color::White { Color::Black } else { Color::White };
+      // Reuse your precomputed pawn attacks to see who attacks the EP square
+      let potential_attackers = movegen::pawn_attacks(them, sq); 
+      if (potential_attackers & our_pawns) != 0 {
+          let file = (sq % 8) as usize;
+          hash ^= keys.en_passant_file[file];
+      }
     }
 
     if self.side_to_move == Color::White {
@@ -316,8 +323,13 @@ impl Board {
     let moving_piece = self.piece_type_on(from).unwrap();
 
     hash ^= keys.side_to_move;
+
     if let Some(sq) = self.en_passant {
-      hash ^= keys.en_passant_file[(sq % 8) as usize];
+      let our_pawns = self.pieces[PieceType::Pawn as usize][us as usize];
+      let potential_attackers = movegen::pawn_attacks(them, sq);
+      if (potential_attackers & our_pawns) != 0 {
+        hash ^= keys.en_passant_file[(sq % 8) as usize];
+      }
     }
 
     hash ^= keys.castling[self.castling_rights as usize];
@@ -362,7 +374,13 @@ impl Board {
 
     self.en_passant = if flag == moves::DOUBLE_PAWN_PUSH_FLAG {
       let ep_sq = if us == Color::White { from + 8 } else { from - 8 };
-      hash ^= keys.en_passant_file[(ep_sq % 8) as usize]; 
+
+      let enemy_pawns = self.pieces[PieceType::Pawn as usize][them as usize];
+      let attacking_pawns = movegen::pawn_attacks(us, ep_sq) & enemy_pawns;
+
+      if attacking_pawns !=0 {
+        hash ^= keys.en_passant_file[(ep_sq % 8) as usize]; 
+      }
       Some(ep_sq)
     } else {
       None

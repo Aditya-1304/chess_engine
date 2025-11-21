@@ -20,8 +20,8 @@ impl ZobristKeys {
     for pt_idx in 0..6 {
       for c_idx in 0..2 {
         for sq_idx in 0..64 {
-          let polyglot_color_idx = 1 - c_idx;
-          let offset = 64 * (2 * pt_idx + polyglot_color_idx);
+          let polyglot_piece_idx = 2 * pt_idx + ( 1 - c_idx);
+          let offset = 64 * polyglot_piece_idx;
           pieces[pt_idx][c_idx][sq_idx] = POLYGOT_RANDOM[offset + sq_idx];
         }
       }
