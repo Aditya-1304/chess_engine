@@ -1,7 +1,7 @@
 use std::io::{self, BufRead};
 use crate::board::Board;
 use crate::search::Searcher;
-use crate::moves::{self, Move, MoveList};
+use crate::moves::{self, Move, MoveList, format};
 use crate::types::{Color, PieceType};
 pub fn main_loop() {
     let stdin = io::stdin();
@@ -73,39 +73,39 @@ fn parse_move(board: &Board, move_str: &str) -> Move {
         // or just assume the GUI sends legal moves.
         // However, we need to match the string.
         
-        if format_move(m) == move_str {
+        if format(m) == move_str {
             return m;
         }
     }
     0
 }
-fn format_move(m: Move) -> String {
-    let from = moves::from_sq(m);
-    let to = moves::to_sq(m);
+// fn format_move(m: Move) -> String {
+//     let from = moves::from_sq(m);
+//     let to = moves::to_sq(m);
     
-    let f_file = (from % 8) as u8;
-    let f_rank = (from / 8) as u8;
-    let t_file = (to % 8) as u8;
-    let t_rank = (to / 8) as u8;
-    let mut s = format!(
-        "{}{}{}{}",
-        (b'a' + f_file) as char,
-        (b'1' + f_rank) as char,
-        (b'a' + t_file) as char,
-        (b'1' + t_rank) as char
-    );
-    if moves::is_promotion(m) {
-        let ch = match moves::promotion_piece(m) {
-            PieceType::Knight => 'n',
-            PieceType::Bishop => 'b',
-            PieceType::Rook => 'r',
-            PieceType::Queen => 'q',
-            _ => 'q',
-        };
-        s.push(ch);
-    }
-    s
-}
+//     let f_file = (from % 8) as u8;
+//     let f_rank = (from / 8) as u8;
+//     let t_file = (to % 8) as u8;
+//     let t_rank = (to / 8) as u8;
+//     let mut s = format!(
+//         "{}{}{}{}",
+//         (b'a' + f_file) as char,
+//         (b'1' + f_rank) as char,
+//         (b'a' + t_file) as char,
+//         (b'1' + t_rank) as char
+//     );
+//     if moves::is_promotion(m) {
+//         let ch = match moves::promotion_piece(m) {
+//             PieceType::Knight => 'n',
+//             PieceType::Bishop => 'b',
+//             PieceType::Rook => 'r',
+//             PieceType::Queen => 'q',
+//             _ => 'q',
+//         };
+//         s.push(ch);
+//     }
+//     s
+// }
 fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let mut depth = 6; // Default depth
@@ -169,7 +169,7 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
     let (_score, best_move) = searcher.search(board, depth);
     
     if let Some(m) = best_move {
-        println!("bestmove {}", format_move(m));
+        println!("bestmove {}", format(m));
     } else {
         println!("bestmove 0000");
     }

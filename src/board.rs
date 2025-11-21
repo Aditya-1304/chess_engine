@@ -290,7 +290,7 @@ impl Board {
       hash ^= keys.en_passant_file[file];
     }
 
-    if self.side_to_move == Color::Black {
+    if self.side_to_move == Color::White {
       hash ^= keys.side_to_move;
     }
     hash

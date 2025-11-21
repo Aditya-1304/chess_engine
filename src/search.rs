@@ -20,13 +20,19 @@ pub struct Searcher {
 
 impl Searcher {
     pub fn new() -> Self {
+        let book = OpeningBook::new("Perfect2023.bin");
+        if book.file.is_some() {
+            println!("info string Opening book loaded successfully");
+        } else {
+            println!("info string Warning: book.bin not found");
+        }
         Self {
             nodes: 0,
             start_time: Instant::now(),
             time_limit_ms: 0,
             stop: false,
             tt: TranspositionTable::new(64), // 64MB default
-            book: OpeningBook::new("book.bin")
+            book,
         }
     }
 
@@ -40,8 +46,33 @@ impl Searcher {
         let mut best_move = None;
         let mut score = 0;
         if let Some(book_move) = self.book.get_move(board.zobrist_hash) {
-            println!("bestmove {}", format_move(book_move));
-            return (0, Some(book_move));
+            let mut move_list = MoveList::new();
+            board.generate_pseudo_legal_moves(&mut move_list);
+
+            let mut found_move = None;
+
+            for &m in move_list.iter() {
+                if moves::from_sq(m) == moves::from_sq(book_move)
+                && moves::to_sq(m) == moves::to_sq(book_move) {
+                    if moves::is_promotion(book_move) {
+                        if moves::is_promotion(m) && moves::promotion_piece(m) == moves::promotion_piece(book_move) {
+                            found_move = Some(m);
+                            break;
+                        }
+                    } else {
+                        found_move = Some(m);
+                        break;
+                    }
+                }
+
+            }
+            if let Some(real_move) = found_move {
+                
+            return (0, Some(real_move));
+            } else {
+
+            }
+            
         }
         // Iterative Deepening
         for d in 1..=depth {

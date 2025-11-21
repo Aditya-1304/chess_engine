@@ -1,3 +1,4 @@
+use std::fmt;
 use crate::types::{PieceType, Square};
 /* 
   Bits 0-5 from square (64 squares) 
@@ -88,5 +89,35 @@ impl MoveList {
 
   pub fn as_mut_slice(&mut self) -> &mut [Move] {
     &mut self.moves[..self.count]
+  }
+}
+
+pub fn format_square(sq: Square) -> String {
+  let file = sq % 8;
+  let rank = sq / 8;
+  format!("{}{}", (b'a' + file) as char, (b'1' + rank) as char)
+}
+
+pub fn format(m: Move) -> String {
+  let from = from_sq(m);
+  let to = to_sq(m);
+  let mut s = format!("{}{}", format_square(from), format_square(to));
+
+  if is_promotion(m) {
+    let ch = match promotion_piece(m) {
+      PieceType::Knight => 'n',
+      PieceType::Bishop => 'b',
+      PieceType::Rook => 'r',
+      PieceType::Queen => 'q',
+      _ => 'q',
+    };
+    s.push(ch);
+  }
+  s
+}
+
+impl fmt::Display for MoveList {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "MoveList len={}", self.len())
   }
 }
