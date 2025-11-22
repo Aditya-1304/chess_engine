@@ -497,6 +497,42 @@ impl Board {
     count >= 1
   }
 
+  pub fn make_null_move(&mut self) -> Option<Square> {
+    let keys = zobrist::keys();
+    let old_ep = self.en_passant;
+
+    if let Some(ep) = self.en_passant {
+      self.zobrist_hash ^= keys.en_passant_file[(ep % 8) as usize];
+      self.en_passant = None;
+    }
+
+    self.zobrist_hash ^= keys.side_to_move;
+    self.side_to_move = if self.side_to_move == Color::White {
+      Color::Black
+    } else {
+      Color::White
+    };
+
+    old_ep
+  }
+
+  pub fn unmake_null_move(&mut self, old_ep: Option<Square>) {
+    let keys = zobrist::keys();
+
+    self.side_to_move = if self.side_to_move == Color::White {
+      Color::Black
+    } else {
+      Color::White
+    };
+
+    self.zobrist_hash ^= keys.side_to_move;
+
+    if let Some(ep) = old_ep {
+      self.en_passant = Some(ep);
+      self.zobrist_hash ^= keys.en_passant_file[(ep % 8) as usize];
+    } 
+  }
+
 }
 
 impl fmt::Display for Board {

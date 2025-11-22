@@ -67,13 +67,13 @@ impl TranspositionTable {
   }
 
   pub fn probe(&self, key: ZHash) -> Option<(Move, i32, u8, TTFlag)> {
-    let index = (key as usize) % (self.size - 1);
+    let index = (key as usize) & (self.size - 1);
     let cluster = &self.table[index];
 
     for i in 0..4 {
       let entry = &cluster.entries[i];
       if entry.key == key {
-        let mv = if entry.move_best == 0 { None } else { Some(entry.move_best) };
+        let _mv = if entry.move_best == 0 { None } else { Some(entry.move_best) };
         let flag = match entry.flag {
             0 => TTFlag::Exact,
             1 => TTFlag::Alpha,
@@ -101,19 +101,19 @@ impl TranspositionTable {
     let flag_u8 = flag as u8;
 
     let mut replace_idx = 0;
-    let mut min_depth = 255;
+    let mut _min_depth = 255;
     let mut found = false;
 
     for i in 0..4 {
       if cluster.entries[i].key == key {
-        replace_idx = 1;
+        replace_idx = i;
         found = true;
         break;
       }
     }
 
     if !found {
-      // Find the oldest genratoin, then shallowest depth (not the most optimal will optimize later)
+      // Find the oldest generation, then shallowest depth (not the most optimal will optimize later)
       let mut best_score = -1000;
 
       for i in 0..4 {
