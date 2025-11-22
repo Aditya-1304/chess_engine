@@ -27,7 +27,8 @@ pub const MATE_SCORE: i32 = 31000;
 pub struct Searcher {
     pub nodes: u64,
     pub start_time: Instant,
-    pub time_limit_ms: u128,
+    pub time_soft_limit: u128,
+    pub time_hard_limit: u128,
     pub stop: bool,
     pub tt: TranspositionTable,
     pub book: OpeningBook,
@@ -64,7 +65,8 @@ impl Searcher {
         Self {
             nodes: 0,
             start_time: Instant::now(),
-            time_limit_ms: 0,
+            time_soft_limit: 0,
+            time_hard_limit: 0,
             stop: false,
             tt: TranspositionTable::new(64), // 64MB default
             book,
@@ -80,15 +82,36 @@ impl Searcher {
         self.tt.new_search();
         self.killers = [[None; 2]; 64];
 
-        if self.time_limit_ms == 0 {
-            self.time_limit_ms = 5000;
-        }
+        if self.time_soft_limit == 0 { self.time_soft_limit = u128::MAX; }
+        if self.time_hard_limit == 0 { self.time_hard_limit = u128::MAX; }
 
         let mut best_move = None;
         let mut score = 0;
 
+        // if there is only a single legal move on the position then play it immediately
+        let mut root_moves = MoveList::new();
+        board.generate_pseudo_legal_moves(&mut root_moves);
+        let mut legal_moves = Vec::new();
+        for &m in root_moves.iter() {
+            let undo = board.make_move(m);
+            let us = if board.side_to_move == Color::White { Color::Black } else { Color::White };
+            let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+            if !board.is_square_attacked(king_sq, board.side_to_move) {
+                legal_moves.push(m);
+            }
+            board.unmake_move(m, undo);
+        }
+        
+        if legal_moves.len() == 1 {
+            return (0, Some(legal_moves[0]));
+        }
+
+        let mut prev_best_move = None;
+        let mut stability = 0;
+        let mut last_iter_time = 0_u128;
 
         println!("info string Zobrist Hash: {:x}", board.zobrist_hash);
+
         if let Some(book_move) = self.book.get_move(board.zobrist_hash) {
             let mut move_list = MoveList::new();
             board.generate_pseudo_legal_moves(&mut move_list);
@@ -119,27 +142,98 @@ impl Searcher {
             
         }
 
+        let mut alpha = -INF;
+        let mut beta = INF;
+
         // Iterative Deepening
         for d in 1..=depth {
-            let (s, m) = self.negamax(board, d, 0, -INF, INF, true);
+            // let (s, m) = self.negamax(board, d, 0, -INF, INF, true);
+            // if self.stop {
+            //     break;
+            // }
+
+            // score = s;
+            // if let Some(mv) = m {
+            //     if Some(mv) == prev_best_move {
+            //         stability += 1;
+            //     } else {
+            //         stability = 0;
+            //     }
+            //     prev_best_move = Some(mv);
+            //     best_move = Some(mv);
+            // }
+
+
+            let elapsed = self.start_time.elapsed().as_millis();
+            if self.time_hard_limit != u128::MAX && elapsed >= self.time_hard_limit {
+                self.stop = true;
+            }
+            if self.stop { break; }
+            // If we have used more than 60% of our soft limit, do NOT start a new depth.
+            // The next depth usually takes 2-5x longer, so we would likely run out of time.
+            if d > 1 && self.time_soft_limit != u128::MAX {
+                let projected = elapsed + last_iter_time.saturating_mul(3) / 2 + 5;
+                if projected >= self.time_soft_limit {
+                    break;
+                }
+            }
+
+            let iter_start_time = self.start_time.elapsed().as_millis();
+            // -----------------------
+
+            // --- ASPIRATION WINDOWS ---
+            let mut search_score;
+            if d > 4 {
+                alpha = score - 50;
+                beta = score + 50;
+                let (s, m) = self.negamax(board, d, 0, alpha, beta, true);
+                search_score = s;
+                
+                if s <= alpha || s >= beta {
+                    // Fail low/high, re-search with full window
+                    let (s_full, m_full) = self.negamax(board, d, 0, -INF, INF, true);
+                    search_score = s_full;
+                    if !self.stop {
+                        if let Some(mv) = m_full { best_move = Some(mv); }
+                    }
+                } else {
+                    if !self.stop {
+                        if let Some(mv) = m { best_move = Some(mv); }
+                    }
+                }
+            } else {
+                // Standard search for low depths
+                let (s, m) = self.negamax(board, d, 0, -INF, INF, true);
+                search_score = s;
+                if !self.stop {
+                    if let Some(mv) = m { best_move = Some(mv); }
+                }
+            }
+            
             if self.stop {
                 break;
             }
 
-            score = s;
-            if let Some(mv) = m {
-                best_move = Some(mv);
+            score = search_score;
+            if let Some(mv) = best_move {
+                if Some(mv) == prev_best_move {
+                    stability += 1;
+                } else {
+                    stability = 0;
+                }
+                prev_best_move = Some(mv);
             }
 
             let time_elapsed = self.start_time.elapsed().as_millis();
+            last_iter_time = time_elapsed.saturating_sub(iter_start_time);
             let nps = if time_elapsed > 0 { (self.nodes as u128 * 1000) / time_elapsed } else { 0 };
             
             print!("info depth {} score ", d);
-            if score > 48000 {
-                 let mate_in = (49000 - score + 1) / 2;
+            if score > 30000 {
+                 let mate_in = (31000 - score + 1) / 2;
                  print!("mate {}", mate_in);
-            } else if score < -48000 {
-                 let mate_in = (49000 + score) / 2;
+            } else if score < -30000 {
+                 let mate_in = (31000 + score) / 2;
                  print!("mate -{}", mate_in);
             } else {
                  print!("cp {}", score);
@@ -158,6 +252,21 @@ impl Searcher {
                 }
             }
             println!(" nodes {} nps {} time {}", self.nodes, nps , time_elapsed);
+
+            if self.time_hard_limit != 0 && time_elapsed >= self.time_hard_limit {
+                self.stop = true;
+                break;
+            }
+            if self.time_soft_limit != 0 && time_elapsed >= self.time_soft_limit {
+                self.stop = true;
+                break;
+            }
+
+            if stability >= 4 && time_elapsed > self.time_soft_limit / 2 {
+                self.stop = true;
+                break;
+            }
+
         }
         (score, best_move)
     }
@@ -173,7 +282,8 @@ impl Searcher {
         do_null: bool,
     ) -> (i32, Option<Move>) {
         if self.nodes & 2047 == 0 {
-            if self.start_time.elapsed().as_millis() > self.time_limit_ms {
+            if self.time_hard_limit != u128::MAX &&
+               self.start_time.elapsed().as_millis() >= self.time_hard_limit {
                 self.stop = true;
             }
         }
@@ -359,7 +469,10 @@ impl Searcher {
 
     fn quiescence(&mut self, board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
         if self.nodes & 2047 == 0 {
-             if self.start_time.elapsed().as_millis() > self.time_limit_ms { self.stop = true; }
+            if self.time_hard_limit != u128::MAX &&
+               self.start_time.elapsed().as_millis() >= self.time_hard_limit {
+                self.stop = true;
+            }
         }
         if self.stop { return 0; }
         self.nodes += 1;

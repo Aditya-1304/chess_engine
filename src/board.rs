@@ -319,15 +319,16 @@ impl Board {
       captured_piece_type: self.piece_type_on(to),
       old_zobrist_hash: self.zobrist_hash,
     };
+    self.history.push(undo);
 
     let moving_piece = self.piece_type_on(from).unwrap();
 
     hash ^= keys.side_to_move;
 
     if let Some(sq) = self.en_passant {
-      let our_pawns = self.pieces[PieceType::Pawn as usize][us as usize];
+      let capturers = self.pieces[PieceType::Pawn as usize][us as usize];
       let potential_attackers = movegen::pawn_attacks(them, sq);
-      if (potential_attackers & our_pawns) != 0 {
+      if (potential_attackers & capturers) != 0 {
         hash ^= keys.en_passant_file[(sq % 8) as usize];
       }
     }
@@ -376,7 +377,7 @@ impl Board {
       let ep_sq = if us == Color::White { from + 8 } else { from - 8 };
 
       let enemy_pawns = self.pieces[PieceType::Pawn as usize][them as usize];
-      let attacking_pawns = movegen::pawn_attacks(us, ep_sq) & enemy_pawns;
+      let attacking_pawns = movegen::pawn_attacks(them, ep_sq) & enemy_pawns;
 
       if attacking_pawns !=0 {
         hash ^= keys.en_passant_file[(ep_sq % 8) as usize]; 
@@ -407,7 +408,7 @@ impl Board {
   }
 
   pub fn unmake_move(&mut self, m: Move, undo: UndoInfo) {
-
+    let _ = self.history.pop();
     self.zobrist_hash = undo.old_zobrist_hash;
 
     let from = moves::from_sq(m);
@@ -482,19 +483,18 @@ impl Board {
 
   pub fn is_repetition(&self) -> bool {
     let mut count = 0;
-    for i in (0..self.history.len()).rev() {
-      let undo = &self.history[i];
-
+    for undo in self.history.iter().rev() {
       if undo.old_halfmove_clock == 0 {
         break;
       }
-
       if undo.old_zobrist_hash == self.zobrist_hash {
         count += 1;
+        if count >= 2 {
+          return true;
+        }
       }
     }
-
-    count >= 1
+    false
   }
 
   pub fn make_null_move(&mut self) -> Option<Square> {

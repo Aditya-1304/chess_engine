@@ -84,11 +84,13 @@ fn parse_move(board: &Board, move_str: &str) -> Move {
 
 fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let mut depth = 64; // Default depth
-    let mut wtime = 0;
-    let mut btime = 0;
-    let mut movetime = 0;
-    let mut movestogo = 30; // Assumption
+    let mut depth = 64; 
+    let mut wtime: u64 = 0;
+    let mut btime: u64 = 0;
+    let mut winc: u64 = 0;
+    let mut binc: u64 = 0;
+    let mut movetime: u64 = 0;
+    let mut movestogo = None;
     let mut i = 1;
     while i < parts.len() {
         match parts[i] {
@@ -110,6 +112,18 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
                     i += 1;
                 }
             }
+            "winc" => {
+                if i + 1 < parts.len() {
+                    winc = parts[i+1].parse().unwrap_or(0);
+                    i += 1;
+                }
+            }
+            "binc" => {
+                if i + 1 < parts.len() {
+                    binc = parts[i+1].parse().unwrap_or(0);
+                    i += 1;
+                }
+            }
             "movetime" => {
                 if i + 1 < parts.len() {
                     movetime = parts[i+1].parse().unwrap_or(0);
@@ -118,7 +132,7 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
             }
             "movestogo" => {
                 if i + 1 < parts.len() {
-                    movestogo = parts[i+1].parse().unwrap_or(25);
+                    movestogo =  Some(parts[i+1].parse().unwrap_or(25));
                     i += 1;
                 }
             }
@@ -127,23 +141,52 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
         i += 1;
     }
 
-    let mut time_limit = 0;
+    let safety_margin = 200_u64;
+    let mut time_limit: u64;
+    let mut hard_limit: u64;
+
     if movetime > 0 {
-        time_limit = movetime;
+        let spendable = movetime.saturating_sub(safety_margin);
+        time_limit = spendable.max(5);
+        time_limit = time_limit.min(movetime.saturating_sub(1).max(1));
+        hard_limit = movetime.saturating_sub(5).max(time_limit + 10);
+        hard_limit = hard_limit.min(movetime);
     } else {
-        let time_left = if board.side_to_move == Color::White { wtime } else { btime };
-        if time_left > 0 {
-            time_limit = time_left / movestogo;
+        let (time_left, inc) = if board.side_to_move == Color::White { (wtime, winc) } else { (btime, binc) };
+        let usable = time_left.saturating_sub(safety_margin);
+
+        if usable == 0 {
+            if inc == 0 {
+                time_limit = 500;
+                hard_limit = 800;
+            } else {
+                let inc_budget = inc.saturating_sub(safety_margin / 2).max(50);
+                time_limit = inc_budget;
+                hard_limit = (inc_budget + safety_margin).max(time_limit + 50);
+                hard_limit = hard_limit.min(inc);
+                time_limit = time_limit.min(hard_limit); 
+            }
+        } else {
+            let mtg = movestogo.unwrap_or(40).max(1) as u64;
+            let base = usable / mtg;
+            let inc_bonus = inc.saturating_mul(3) / 4;
+            time_limit = base.saturating_add(inc_bonus).max(50);
+
+            if movestogo.is_none() {
+                let greedy = usable / 5 + inc / 2;
+                time_limit = time_limit.min(greedy);
+            }
+
+            time_limit = time_limit.min(usable);
+            hard_limit = (time_limit * 3 / 2 + safety_margin).min(time_left.saturating_sub(safety_margin / 2).max(time_limit + 50));
         }
     }
-    
-    searcher.time_limit_ms = time_limit as u128;
-    
-    if time_limit == 0 {
-         searcher.time_limit_ms = 5000;
-    }
+
+    searcher.time_soft_limit = time_limit as u128;
+    searcher.time_hard_limit = hard_limit as u128;
+
     let (_score, best_move) = searcher.search(board, depth);
-    
+
     if let Some(m) = best_move {
         println!("bestmove {}", format(m));
     } else {
