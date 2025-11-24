@@ -159,6 +159,7 @@ impl TranspositionTable {
       flag: 0,
       _pad: 0,
     };
+    
     let empty_cluster = Cluster {
       entries: [empty_entry; 4],
     };

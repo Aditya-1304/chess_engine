@@ -1,10 +1,5 @@
 use chess_engine::{
-    board::Board,
-    movegen,
-    search::Searcher,
-    moves::{self, Move},
-    types::{PieceType},
-    uci,
+    board::Board, movegen, moves::{self, Move}, nnue, search::Searcher, types::PieceType, uci
 };
 use std::env;
 use std::time::Instant;
@@ -13,6 +8,19 @@ const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 
 
 fn main() {
     movegen::init();
+
+    println!("Loading NNUE...");
+    match nnue::Network::load("nn-62ef826d1a6d.nnue") {
+        Ok(net) => {
+            nnue::NETWORK.set(net).ok();
+            println!("NNUE loaded successfully!");
+        }
+        Err(e) => {
+            println!("Warning: Could not load NNUE: {}", e);
+            println!("Falling back to classical evaluation.");
+        }
+    }
+    
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         uci::main_loop();

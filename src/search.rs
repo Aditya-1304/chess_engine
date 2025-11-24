@@ -147,30 +147,13 @@ impl Searcher {
 
         // Iterative Deepening
         for d in 1..=depth {
-            // let (s, m) = self.negamax(board, d, 0, -INF, INF, true);
-            // if self.stop {
-            //     break;
-            // }
-
-            // score = s;
-            // if let Some(mv) = m {
-            //     if Some(mv) == prev_best_move {
-            //         stability += 1;
-            //     } else {
-            //         stability = 0;
-            //     }
-            //     prev_best_move = Some(mv);
-            //     best_move = Some(mv);
-            // }
-
 
             let elapsed = self.start_time.elapsed().as_millis();
             if self.time_hard_limit != u128::MAX && elapsed >= self.time_hard_limit {
                 self.stop = true;
             }
             if self.stop { break; }
-            // If we have used more than 60% of our soft limit, do NOT start a new depth.
-            // The next depth usually takes 2-5x longer, so we would likely run out of time.
+
             if d > 1 && self.time_soft_limit != u128::MAX {
                 let projected = elapsed + last_iter_time.saturating_mul(3) / 2 + 5;
                 if projected >= self.time_soft_limit {
@@ -179,9 +162,7 @@ impl Searcher {
             }
 
             let iter_start_time = self.start_time.elapsed().as_millis();
-            // -----------------------
 
-            // --- ASPIRATION WINDOWS ---
             let mut search_score;
             if d > 4 {
                 alpha = score - 50;

@@ -8,6 +8,17 @@ pub enum Color {
   Black,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Accumulator {
+  pub values: [i16; 256],
+}
+
+impl Default for Accumulator {
+  fn default() -> Self {
+      Accumulator { values: [0; 256] }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PieceType {
