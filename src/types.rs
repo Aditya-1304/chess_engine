@@ -19,6 +19,12 @@ impl Default for Accumulator {
   }
 }
 
+impl Accumulator {
+  pub fn copy_from_slice(&mut self, src: &[i16]) {
+    self.values.copy_from_slice(&src[0..256]);
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PieceType {
