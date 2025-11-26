@@ -1,6 +1,5 @@
 use crate::{
-  board::Board,
-  types::{Color, PieceType},
+  board::Board, nnue, types::{Color, PieceType}
 };
 
 const PAWN_VALUE: i32 = 100;
@@ -83,6 +82,10 @@ const KING_TABLE: [i32; 64] = [
 ];
 
 pub fn evaluate(board: &Board) -> i32 {
+  if nnue::NETWORK.get().is_some() {
+    return nnue::evaluate(board);
+  }
+
   let mut score = 0;
 
   for pt in 0..6 {

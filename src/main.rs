@@ -1,9 +1,10 @@
 use chess_engine::{
     board::Board,
     movegen,
-    search::Searcher,
     moves::{self, Move},
-    types::{PieceType},
+    nnue,
+    search::Searcher,
+    types::PieceType,
     uci,
 };
 use std::env;
@@ -13,6 +14,19 @@ const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 
 
 fn main() {
     movegen::init();
+
+    println!("Loading NNUE...");
+    match nnue::Network::load("nn-62ef826d1a6d.nnue") {
+        Ok(net) => {
+            nnue::NETWORK.set(net).ok();
+            println!("NNUE loaded successfully!");
+        }
+        Err(e) => {
+            println!("Warning: Could not load NNUE: {}", e);
+            println!("Falling back to classical evaluation.");
+        }
+    }
+
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         uci::main_loop();
@@ -41,7 +55,7 @@ fn main() {
                 } else {
                     Board::from_fen(START_FEN).expect("Invalid Start FEN")
                 };
-                
+
                 run_perft(&mut board, depth);
             } else {
                 eprintln!("Usage: cargo run -- perft <depth> [optional_fen]");
@@ -56,7 +70,7 @@ fn main() {
                 } else {
                     Board::from_fen(START_FEN).expect("Invalid Start FEN")
                 };
-                
+
                 run_search(&mut board, depth);
             } else {
                 eprintln!("Usage: cargo run -- search <depth> [optional_fen]");
@@ -69,14 +83,18 @@ fn main() {
 fn run_perft(board: &mut Board, depth: u8) {
     println!("Running perft depth {}...", depth);
     println!("{}", board);
-    
+
     let start = Instant::now();
     let nodes = board.perft(depth);
     let duration = start.elapsed();
-    
+
     let seconds = duration.as_secs_f64();
-    let nps = if seconds > 0.0 { (nodes as f64 / seconds) as u64 } else { 0 };
-    
+    let nps = if seconds > 0.0 {
+        (nodes as f64 / seconds) as u64
+    } else {
+        0
+    };
+
     println!("-----------------------------");
     println!("Nodes: {}", nodes);
     println!("Time:  {:.3} s", seconds);
@@ -90,12 +108,16 @@ fn run_search(board: &mut Board, depth: u8) {
 
     let mut searcher = Searcher::new();
     let start = Instant::now();
-    
+
     let (score, best_move) = searcher.search(board, depth);
-    
+
     let duration = start.elapsed();
     let seconds = duration.as_secs_f64();
-    let nps = if seconds > 0.0 { (searcher.nodes as f64 / seconds) as u64 } else { 0 };
+    let nps = if seconds > 0.0 {
+        (searcher.nodes as f64 / seconds) as u64
+    } else {
+        0
+    };
 
     println!("-----------------------------");
     if let Some(m) = best_move {
@@ -105,11 +127,11 @@ fn run_search(board: &mut Board, depth: u8) {
     }
 
     // Pretty print score
-    if score > 48000 {
-        let moves_to_mate = (49000 - score + 1) / 2; 
+    if score > 30000 {
+        let moves_to_mate = (32000 - score + 1) / 2;
         println!("Score:     Mate in {}", moves_to_mate);
-    } else if score < -48000 {
-        let moves_to_mate = (49000 + score) / 2;
+    } else if score < -30000 {
+        let moves_to_mate = (32000 + score) / 2;
         println!("Score:     Mate in -{}", moves_to_mate);
     } else {
         println!("Score:     {:.2}", score as f32 / 100.0);
@@ -124,7 +146,7 @@ fn run_search(board: &mut Board, depth: u8) {
 fn format_move(m: Move) -> String {
     let from = moves::from_sq(m);
     let to = moves::to_sq(m);
-    
+
     let f_file = (from % 8) as u8;
     let f_rank = (from / 8) as u8;
     let t_file = (to % 8) as u8;
@@ -159,3 +181,4 @@ fn print_help() {
     println!("  search <depth>         : Run alpha-beta search");
     println!("  search <depth> \"<FEN>\" : Run search on specific position");
 }
+
