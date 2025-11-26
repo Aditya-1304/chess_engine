@@ -10,3 +10,5 @@ pub mod uci;
 pub mod book;
 pub mod polygot_keys;
 pub mod nnue;
+pub mod syzygy;
+pub mod see;

@@ -1,25 +1,37 @@
-use std::io::{self, BufRead};
 use crate::board::Board;
-use crate::search::Searcher;
 use crate::moves::{Move, MoveList, format};
-use crate::types::{Color};
-
+use crate::search::Searcher;
+use crate::syzygy::auto_load;
+use crate::types::Color;
+use std::io::{self, BufRead};
 
 pub fn main_loop() {
     let stdin = io::stdin();
     let mut board = Board::default();
     let mut searcher = Searcher::new();
+    auto_load();
 
     for line in stdin.lock().lines() {
         let line = line.unwrap();
         let cmd = line.trim();
-        
+
         if cmd == "uci" {
             println!("id name AdityaChess");
             println!("id author Aditya");
+            println!("option name SyzygyPath type string default <empty>");
             println!("uciok");
         } else if cmd == "isready" {
             println!("readyok");
+        } else if cmd.starts_with("setoption") {
+            let parts: Vec<&str> = cmd.split_whitespace().collect();
+            if parts.len() >= 5
+                && parts[1] == "name"
+                && parts[2] == "SyzygyPath"
+                && parts[3] == "value"
+            {
+                let path = parts[4..].join(" ");
+                crate::syzygy::init_global_syzygy(&path);
+            }
         } else if cmd == "ucinewgame" {
             searcher.tt.clear();
         } else if cmd.starts_with("position") {
@@ -34,14 +46,14 @@ pub fn main_loop() {
     }
 }
 
-
 fn parse_position(cmd: &str, board: &mut Board) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let mut moves_idx = 0;
 
     if parts.len() > 1 {
         if parts[1] == "startpos" {
-            *board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+            *board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+                .unwrap();
             moves_idx = 2;
         } else if parts[1] == "fen" {
             // join parts until "moves"
@@ -70,7 +82,6 @@ fn parse_position(cmd: &str, board: &mut Board) {
     }
 }
 
-
 fn parse_move(board: &Board, move_str: &str) -> Move {
     let mut move_list = MoveList::new();
     board.generate_pseudo_legal_moves(&mut move_list);
@@ -84,7 +95,7 @@ fn parse_move(board: &Board, move_str: &str) -> Move {
 
 fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let mut depth = 64; 
+    let mut depth = 64;
     let mut wtime: u64 = 0;
     let mut btime: u64 = 0;
     let mut winc: u64 = 0;
@@ -96,43 +107,43 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
         match parts[i] {
             "depth" => {
                 if i + 1 < parts.len() {
-                    depth = parts[i+1].parse().unwrap_or(64);
+                    depth = parts[i + 1].parse().unwrap_or(64);
                     i += 1;
                 }
             }
             "wtime" => {
                 if i + 1 < parts.len() {
-                    wtime = parts[i+1].parse().unwrap_or(0);
+                    wtime = parts[i + 1].parse().unwrap_or(0);
                     i += 1;
                 }
             }
             "btime" => {
                 if i + 1 < parts.len() {
-                    btime = parts[i+1].parse().unwrap_or(0);
+                    btime = parts[i + 1].parse().unwrap_or(0);
                     i += 1;
                 }
             }
             "winc" => {
                 if i + 1 < parts.len() {
-                    winc = parts[i+1].parse().unwrap_or(0);
+                    winc = parts[i + 1].parse().unwrap_or(0);
                     i += 1;
                 }
             }
             "binc" => {
                 if i + 1 < parts.len() {
-                    binc = parts[i+1].parse().unwrap_or(0);
+                    binc = parts[i + 1].parse().unwrap_or(0);
                     i += 1;
                 }
             }
             "movetime" => {
                 if i + 1 < parts.len() {
-                    movetime = parts[i+1].parse().unwrap_or(0);
+                    movetime = parts[i + 1].parse().unwrap_or(0);
                     i += 1;
                 }
             }
             "movestogo" => {
                 if i + 1 < parts.len() {
-                    movestogo =  Some(parts[i+1].parse().unwrap_or(25));
+                    movestogo = Some(parts[i + 1].parse().unwrap_or(25));
                     i += 1;
                 }
             }
@@ -152,7 +163,11 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
         hard_limit = movetime.saturating_sub(5).max(time_limit + 10);
         hard_limit = hard_limit.min(movetime);
     } else {
-        let (time_left, inc) = if board.side_to_move == Color::White { (wtime, winc) } else { (btime, binc) };
+        let (time_left, inc) = if board.side_to_move == Color::White {
+            (wtime, winc)
+        } else {
+            (btime, binc)
+        };
         let usable = time_left.saturating_sub(safety_margin);
 
         if usable == 0 {
@@ -164,7 +179,7 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
                 time_limit = inc_budget;
                 hard_limit = (inc_budget + safety_margin).max(time_limit + 50);
                 hard_limit = hard_limit.min(inc);
-                time_limit = time_limit.min(hard_limit); 
+                time_limit = time_limit.min(hard_limit);
             }
         } else {
             let mtg = movestogo.unwrap_or(40).max(1) as u64;
@@ -178,7 +193,11 @@ fn parse_go(cmd: &str, searcher: &mut Searcher, board: &mut Board) {
             }
 
             time_limit = time_limit.min(usable);
-            hard_limit = (time_limit * 3 / 2 + safety_margin).min(time_left.saturating_sub(safety_margin / 2).max(time_limit + 50));
+            hard_limit = (time_limit * 3 / 2 + safety_margin).min(
+                time_left
+                    .saturating_sub(safety_margin / 2)
+                    .max(time_limit + 50),
+            );
         }
     }
 

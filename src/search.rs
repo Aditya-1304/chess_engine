@@ -1,28 +1,16 @@
 use crate::{
-    board::Board, 
-    book::OpeningBook, 
-    eval, 
-    movegen, 
-    moves::{
-        self, 
-        Move, 
-        MoveList
-    }, 
-    tt::{
-        TTFlag, 
-        TranspositionTable
-    }, 
-    types::{
-        Color, 
-        PieceType
-    }
+    board::Board,
+    book::OpeningBook,
+    eval, movegen,
+    moves::{self, Move, MoveList},
+    see,
+    tt::{TTFlag, TranspositionTable},
+    types::{Color, PieceType},
 };
 use std::time::Instant;
 
-
 const INF: i32 = 32000;
 pub const MATE_SCORE: i32 = 31000;
-
 
 pub struct Searcher {
     pub nodes: u64,
@@ -36,7 +24,6 @@ pub struct Searcher {
     pub history: [[[i32; 64]; 2]; 6],
 }
 
-
 impl Searcher {
     pub fn new() -> Self {
         let book = OpeningBook::new("Perfect2023.bin");
@@ -48,20 +35,11 @@ impl Searcher {
 
         let keys = crate::zobrist::keys();
         println!("--- DEBUG ZOBRIST KEYS ---");
-        // 1. Check the first key (White Pawn on A1) - Should match POLYGOT_RANDOM[0]
-        // A1 is square 0. White is 0. Pawn is 0.
         println!("White Pawn A1 (Index 0):   {:016x}", keys.pieces[0][0][0]);
-        
-        // 2. Check the last piece key (Black King on H8) - Should match POLYGOT_RANDOM[767]
-        // H8 is 63. Black is 1. King is 5.
-        // Offset = 64 * (2 * 5 + 1) = 704. 704 + 63 = 767.
         println!("Black King H8 (Index 767): {:016x}", keys.pieces[5][1][63]);
-        
-        // 3. Check Castling Key (White King Side) - Should match POLYGOT_RANDOM[768]
-        // Castling right 1 (WK)
         println!("Castle WK (Index 768):     {:016x}", keys.castling[1]);
-        
         println!("--------------------------");
+
         Self {
             nodes: 0,
             start_time: Instant::now(),
@@ -71,7 +49,7 @@ impl Searcher {
             tt: TranspositionTable::new(64), // 64MB default
             book,
             killers: [[None; 2]; 64],
-            history: [[[0; 64]; 2]; 6]
+            history: [[[0; 64]; 2]; 6],
         }
     }
 
@@ -82,26 +60,34 @@ impl Searcher {
         self.tt.new_search();
         self.killers = [[None; 2]; 64];
 
-        if self.time_soft_limit == 0 { self.time_soft_limit = u128::MAX; }
-        if self.time_hard_limit == 0 { self.time_hard_limit = u128::MAX; }
+        if self.time_soft_limit == 0 {
+            self.time_soft_limit = u128::MAX;
+        }
+        if self.time_hard_limit == 0 {
+            self.time_hard_limit = u128::MAX;
+        }
 
         let mut best_move = None;
         let mut score = 0;
 
-        // if there is only a single legal move on the position then play it immediately
         let mut root_moves = MoveList::new();
         board.generate_pseudo_legal_moves(&mut root_moves);
         let mut legal_moves = Vec::new();
         for &m in root_moves.iter() {
             let undo = board.make_move(m);
-            let us = if board.side_to_move == Color::White { Color::Black } else { Color::White };
-            let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+            let us = if board.side_to_move == Color::White {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let king_sq =
+                board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
             if !board.is_square_attacked(king_sq, board.side_to_move) {
                 legal_moves.push(m);
             }
             board.unmake_move(m, undo);
         }
-        
+
         if legal_moves.len() == 1 {
             return (0, Some(legal_moves[0]));
         }
@@ -112,17 +98,20 @@ impl Searcher {
 
         println!("info string Zobrist Hash: {:x}", board.zobrist_hash);
 
+        // Book Probing
         if let Some(book_move) = self.book.get_move(board.zobrist_hash) {
             let mut move_list = MoveList::new();
             board.generate_pseudo_legal_moves(&mut move_list);
-
             let mut found_move = None;
 
             for &m in move_list.iter() {
                 if moves::from_sq(m) == moves::from_sq(book_move)
-                && moves::to_sq(m) == moves::to_sq(book_move) {
+                    && moves::to_sq(m) == moves::to_sq(book_move)
+                {
                     if moves::is_promotion(book_move) {
-                        if moves::is_promotion(m) && moves::promotion_piece(m) == moves::promotion_piece(book_move) {
+                        if moves::is_promotion(m)
+                            && moves::promotion_piece(m) == moves::promotion_piece(book_move)
+                        {
                             found_move = Some(m);
                             break;
                         }
@@ -131,28 +120,34 @@ impl Searcher {
                         break;
                     }
                 }
-
             }
             if let Some(real_move) = found_move {
-                
-            return (0, Some(real_move));
-            } else {
-
+                return (0, Some(real_move));
             }
-            
+        }
+
+        // Syzygy DTZ Root Probing
+        if board.occupancy[2].count_ones() <= 6 {
+            if let Some(tb) = crate::syzygy::get_global_syzygy() {
+                if board.occupancy[2].count_ones() <= tb.max_pieces() {
+                    // Note: Full DTZ root move extraction is complex.
+                    // For now, we rely on WDL probing in search to guide us to the win.
+                }
+            }
         }
 
         let mut alpha = -INF;
         let mut beta = INF;
 
-        // Iterative Deepening
+        // Iterative Deepening with Aspiration Windows
         for d in 1..=depth {
-
             let elapsed = self.start_time.elapsed().as_millis();
             if self.time_hard_limit != u128::MAX && elapsed >= self.time_hard_limit {
                 self.stop = true;
             }
-            if self.stop { break; }
+            if self.stop {
+                break;
+            }
 
             if d > 1 && self.time_soft_limit != u128::MAX {
                 let projected = elapsed + last_iter_time.saturating_mul(3) / 2 + 5;
@@ -163,34 +158,47 @@ impl Searcher {
 
             let iter_start_time = self.start_time.elapsed().as_millis();
 
-            let mut search_score;
+            // Aspiration Windows
+            let mut delta = 50;
             if d > 4 {
-                alpha = score - 50;
-                beta = score + 50;
+                alpha = (-INF).max(score - delta);
+                beta = (INF).min(score + delta);
+            } else {
+                alpha = -INF;
+                beta = INF;
+            }
+
+            let mut search_score;
+            loop {
                 let (s, m) = self.negamax(board, d, 0, alpha, beta, true);
                 search_score = s;
-                
-                if s <= alpha || s >= beta {
-                    // Fail low/high, re-search with full window
-                    let (s_full, m_full) = self.negamax(board, d, 0, -INF, INF, true);
-                    search_score = s_full;
-                    if !self.stop {
-                        if let Some(mv) = m_full { best_move = Some(mv); }
-                    }
-                } else {
-                    if !self.stop {
-                        if let Some(mv) = m { best_move = Some(mv); }
-                    }
+
+                if self.stop {
+                    break;
                 }
-            } else {
-                // Standard search for low depths
-                let (s, m) = self.negamax(board, d, 0, -INF, INF, true);
-                search_score = s;
-                if !self.stop {
-                    if let Some(mv) = m { best_move = Some(mv); }
+
+                if s <= alpha {
+                    // Fail low: widen alpha downwards
+                    alpha = (-INF).max(alpha - delta);
+                    delta += delta / 2;
+                } else if s >= beta {
+                    // Fail high: widen beta upwards
+                    beta = (INF).min(beta + delta);
+                    delta += delta / 2;
+                } else {
+                    if let Some(mv) = m {
+                        best_move = Some(mv);
+                    }
+                    break;
+                }
+
+                // Safety valve
+                if delta > 3000 {
+                    alpha = -INF;
+                    beta = INF;
                 }
             }
-            
+
             if self.stop {
                 break;
             }
@@ -207,19 +215,23 @@ impl Searcher {
 
             let time_elapsed = self.start_time.elapsed().as_millis();
             last_iter_time = time_elapsed.saturating_sub(iter_start_time);
-            let nps = if time_elapsed > 0 { (self.nodes as u128 * 1000) / time_elapsed } else { 0 };
-            
+            let nps = if time_elapsed > 0 {
+                (self.nodes as u128 * 1000) / time_elapsed
+            } else {
+                0
+            };
+
             print!("info depth {} score ", d);
             if score > 30000 {
-                 let mate_in = (31000 - score + 1) / 2;
-                 print!("mate {}", mate_in);
+                let mate_in = (31000 - score + 1) / 2;
+                print!("mate {}", mate_in);
             } else if score < -30000 {
-                 let mate_in = (31000 + score) / 2;
-                 print!("mate -{}", mate_in);
+                let mate_in = (31000 + score) / 2;
+                print!("mate -{}", mate_in);
             } else {
-                 print!("cp {}", score);
+                print!("cp {}", score);
             }
-            
+
             print!(" pv");
             let mut pv_board = board.clone();
             for _ in 0..d {
@@ -227,12 +239,14 @@ impl Searcher {
                     if mv != 0 {
                         print!(" {}", moves::format(mv));
                         pv_board.make_move(mv);
-                    } else { break; }
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
             }
-            println!(" nodes {} nps {} time {}", self.nodes, nps , time_elapsed);
+            println!(" nodes {} nps {} time {}", self.nodes, nps, time_elapsed);
 
             if self.time_hard_limit != 0 && time_elapsed >= self.time_hard_limit {
                 self.stop = true;
@@ -247,11 +261,9 @@ impl Searcher {
                 self.stop = true;
                 break;
             }
-
         }
         (score, best_move)
     }
-
 
     fn negamax(
         &mut self,
@@ -263,16 +275,57 @@ impl Searcher {
         do_null: bool,
     ) -> (i32, Option<Move>) {
         if self.nodes & 2047 == 0 {
-            if self.time_hard_limit != u128::MAX &&
-               self.start_time.elapsed().as_millis() >= self.time_hard_limit {
+            if self.time_hard_limit != u128::MAX
+                && self.start_time.elapsed().as_millis() >= self.time_hard_limit
+            {
                 self.stop = true;
             }
         }
-        if self.stop { return (0, None); }
+        if self.stop {
+            return (0, None);
+        }
 
         let is_root = ply == 0;
         if !is_root && (board.halfmove_clock >= 100 || board.is_repetition()) {
             return (0, None);
+        }
+
+        // Syzygy Probing
+        if !is_root && board.occupancy[2].count_ones() <= 6 {
+            if let Some(tb) = crate::syzygy::get_global_syzygy() {
+                if board.occupancy[2].count_ones() <= tb.max_pieces() {
+                    if let Some(wdl) = crate::syzygy::probe_wdl(board, &tb) {
+                        let tb_score = match wdl {
+                            pyrrhic_rs::WdlProbeResult::Win => 30000 - ply,
+                            pyrrhic_rs::WdlProbeResult::Loss => -30000 + ply,
+                            _ => 0,
+                        };
+
+                        if tb_score >= beta {
+                            return (tb_score, None);
+                        }
+                        if tb_score <= alpha {
+                            return (tb_score, None);
+                        }
+                        return (tb_score, None);
+                    }
+                }
+            }
+        }
+
+        // Check Extension (Must be done BEFORE depth == 0 check)
+        let in_check = board.is_square_attacked(
+            board.pieces[PieceType::King as usize][board.side_to_move as usize].trailing_zeros()
+                as u8,
+            if board.side_to_move == Color::White {
+                Color::Black
+            } else {
+                Color::White
+            },
+        );
+
+        if in_check {
+            depth += 1;
         }
 
         if depth == 0 {
@@ -281,39 +334,61 @@ impl Searcher {
 
         self.nodes += 1;
 
+
         let mut tt_move = None;
         if let Some((mv, sc, d, flag)) = self.tt.probe(board.zobrist_hash) {
-            tt_move = if mv != 0 { Some(mv) } else { None };
-            if !is_root && d >= depth {
-                let tt_score = score_from_tt(sc, ply);
-                match flag {
-                    TTFlag::Exact => return (tt_score, tt_move),
-                    TTFlag::Beta => {
-                        if tt_score >= beta { return (tt_score, tt_move); }
+            // Verify TT move validity to handle hash collisions/corruption
+            let is_valid = if mv != 0 {
+                let from = moves::from_sq(mv);
+                let to = moves::to_sq(mv);
+                if from == to {
+                    false
+                } else {
+                    let pt = board.piece_type_on(from);
+                    if let Some(p) = pt {
+                        // Check if the piece belongs to the side to move
+                        (board.pieces[p as usize][board.side_to_move as usize] & (1 << from)) != 0
+                    } else {
+                        false
                     }
-                    TTFlag::Alpha => {
-                        if tt_score <= alpha { return (tt_score, tt_move); }
+                }
+            } else {
+                true // No move to verify
+            };
+
+            if is_valid {
+                tt_move = if mv != 0 { Some(mv) } else { None };
+                if !is_root && d >= depth {
+                    let tt_score = score_from_tt(sc, ply);
+                    match flag {
+                        TTFlag::Exact => return (tt_score, tt_move),
+                        TTFlag::Beta => {
+                            if tt_score >= beta {
+                                return (tt_score, tt_move);
+                            }
+                        }
+                        TTFlag::Alpha => {
+                            if tt_score <= alpha {
+                                return (tt_score, tt_move);
+                            }
+                        }
                     }
                 }
             }
         }
 
-        let in_check = board.is_square_attacked(
-            board.pieces[PieceType::King as usize][board.side_to_move as usize].trailing_zeros() as u8,
-            if board.side_to_move == Color::White { Color::Black } else { Color::White }
-        );
-
-        if in_check { depth += 1; }
-
-        // Null Move Pruning
+        // Adaptive Null Move Pruning
         if do_null && !in_check && !is_root && depth >= 3 {
             let static_eval = eval::evaluate(board);
             if static_eval >= beta {
-                let r = 2;
+                let r = if depth > 6 { 3 } else { 2 };
                 let old_ep = board.make_null_move();
-                let (score, _) = self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
+                let (score, _) =
+                    self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
                 board.unmake_null_move(old_ep);
-                if -score >= beta { return (beta, None); }
+                if -score >= beta {
+                    return (beta, None);
+                }
             }
         }
 
@@ -329,7 +404,7 @@ impl Searcher {
             } else if moves::is_capture(m) {
                 move_scores[i] = 1000000 + self.get_mvv_lva(m, board);
             } else {
-                if ply < 64 { // Check bounds for reading
+                if ply < 64 {
                     if self.killers[ply as usize][0] == Some(m) {
                         move_scores[i] = 900000;
                     } else if self.killers[ply as usize][1] == Some(m) {
@@ -345,9 +420,20 @@ impl Searcher {
             }
         }
 
+        // Futility Pruning Setup
+        let mut futility_pruning = false;
+        if !is_root && !in_check && depth <= 3 && alpha < beta - 1 {
+            let eval = eval::evaluate(board);
+            let margin = 150 * (depth as i32);
+            if eval + margin <= alpha {
+                futility_pruning = true;
+            }
+        }
+
         let mut best_score = -INF;
         let mut best_move = None;
         let mut legal_moves = 0;
+        let mut skipped_moves = 0;
         let alpha_orig = alpha;
 
         for i in 0..move_list.len() {
@@ -360,7 +446,6 @@ impl Searcher {
                     best_pick_idx = j;
                 }
             }
-            // Swap moves AND scores
             {
                 let moves_slice = move_list.as_mut_slice();
                 moves_slice.swap(i, best_pick_idx);
@@ -368,10 +453,31 @@ impl Searcher {
             }
 
             let m = move_list.iter().nth(i).unwrap().clone();
+
+            // Futility Pruning Check
+            if futility_pruning && !moves::is_capture(m) && !moves::is_promotion(m) {
+                skipped_moves += 1;
+                continue;
+            }
+
+            if !is_root && depth >= 1 && moves::is_capture(m) && legal_moves > 0 {
+                let see_value = see::see(board, m);
+
+                let threshold = -20 * (depth as i32);
+                if see_value < threshold {
+                    continue;
+                } 
+            }
+
             let undo = board.make_move(m);
-            
-            let us = if board.side_to_move == Color::White { Color::Black } else { Color::White };
-            let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+
+            let us = if board.side_to_move == Color::White {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let king_sq =
+                board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
             if board.is_square_attacked(king_sq, board.side_to_move) {
                 board.unmake_move(m, undo);
                 continue;
@@ -383,25 +489,46 @@ impl Searcher {
                 let (s, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
                 score = -s;
             } else {
+                // Improved LMR
                 let mut reduction = 0;
-                if depth >= 3 && legal_moves > 4 && !moves::is_capture(m) && !moves::is_promotion(m) && !in_check {
-                    reduction = 1;
-                    if legal_moves > 10 { reduction = 2; }
+                if depth >= 3
+                    && legal_moves > 1
+                    && !moves::is_capture(m)
+                    && !moves::is_promotion(m)
+                    && !in_check
+                {
+                    let lmr_depth = (depth as f64).ln();
+                    let lmr_move = (legal_moves as f64).ln();
+                    reduction = (1.0 + lmr_depth * lmr_move / 2.0) as u8;
+                    if reduction >= depth {
+                        reduction = depth - 1;
+                    }
                 }
-                let (s, _) = self.negamax(board, depth - 1 - reduction, ply + 1, -alpha - 1, -alpha, true);
+
+                let (s, _) = self.negamax(
+                    board,
+                    depth - 1 - reduction,
+                    ply + 1,
+                    -alpha - 1,
+                    -alpha,
+                    true,
+                );
                 score = -s;
+
                 if score > alpha && reduction > 0 {
-                     let (s, _) = self.negamax(board, depth - 1, ply + 1, -alpha - 1, -alpha, true);
-                     score = -s;
+                    let (s, _) = self.negamax(board, depth - 1, ply + 1, -alpha - 1, -alpha, true);
+                    score = -s;
                 }
                 if score > alpha && score < beta {
-                     let (s, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
-                     score = -s;
+                    let (s, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
+                    score = -s;
                 }
             }
 
             board.unmake_move(m, undo);
-            if self.stop { return (0, None); }
+            if self.stop {
+                return (0, None);
+            }
 
             if score > best_score {
                 best_score = score;
@@ -410,13 +537,14 @@ impl Searcher {
                     alpha = score;
                     if !moves::is_capture(m) {
                         let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
-                        let c = us;
+                        let c = board.side_to_move;
                         let to = moves::to_sq(m);
-                        self.history[pt as usize][c as usize][to as usize] += (depth as i32) * (depth as i32);
+                        self.history[pt as usize][c as usize][to as usize] +=
+                            (depth as i32) * (depth as i32);
                         if self.history[pt as usize][c as usize][to as usize] > 20000 {
-                             self.history[pt as usize][c as usize][to as usize] /= 2;
+                            self.history[pt as usize][c as usize][to as usize] /= 2;
                         }
-                        if ply < 64 && self.killers[ply as usize][0] != Some(m) { // CHANGED: Added ply < 64 check
+                        if ply < 64 && self.killers[ply as usize][0] != Some(m) {
                             self.killers[ply as usize][1] = self.killers[ply as usize][0];
                             self.killers[ply as usize][0] = Some(m);
                         }
@@ -425,11 +553,12 @@ impl Searcher {
             }
             if alpha >= beta {
                 if !moves::is_capture(m) {
-                     let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
-                     let c = us;
-                     let to = moves::to_sq(m);
-                     self.history[pt as usize][c as usize][to as usize] += (depth as i32) * (depth as i32);
-                     if ply < 64 && self.killers[ply as usize][0] != Some(m) { // CHANGED: Added ply < 64 check
+                    let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
+                    let c = us;
+                    let to = moves::to_sq(m);
+                    self.history[pt as usize][c as usize][to as usize] +=
+                        (depth as i32) * (depth as i32);
+                    if ply < 64 && self.killers[ply as usize][0] != Some(m) {
                         self.killers[ply as usize][1] = self.killers[ply as usize][0];
                         self.killers[ply as usize][0] = Some(m);
                     }
@@ -439,28 +568,59 @@ impl Searcher {
         }
 
         if legal_moves == 0 {
-            if in_check { return (-MATE_SCORE + ply, None); } else { return (0, None); }
+            if in_check {
+                return (-MATE_SCORE + ply, None);
+            } else if skipped_moves > 0 {
+                return (alpha, None);
+            } else {
+                return (0, None);
+            }
         }
 
-        let flag = if best_score <= alpha_orig { TTFlag::Alpha } else if best_score >= beta { TTFlag::Beta } else { TTFlag::Exact };
-        self.tt.store(board.zobrist_hash, best_move, score_to_tt(best_score, ply), depth, flag);
+        let flag = if best_score <= alpha_orig {
+            TTFlag::Alpha
+        } else if best_score >= beta {
+            TTFlag::Beta
+        } else {
+            TTFlag::Exact
+        };
+        self.tt.store(
+            board.zobrist_hash,
+            best_move,
+            score_to_tt(best_score, ply),
+            depth,
+            flag,
+        );
         (best_score, best_move)
     }
 
-
     fn quiescence(&mut self, board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
         if self.nodes & 2047 == 0 {
-            if self.time_hard_limit != u128::MAX &&
-               self.start_time.elapsed().as_millis() >= self.time_hard_limit {
+            if self.time_hard_limit != u128::MAX
+                && self.start_time.elapsed().as_millis() >= self.time_hard_limit
+            {
                 self.stop = true;
             }
         }
-        if self.stop { return 0; }
+        if self.stop {
+            return 0;
+        }
         self.nodes += 1;
-        
+
         let stand_pat = eval::evaluate(board);
-        if stand_pat >= beta { return beta; }
-        if stand_pat > alpha { alpha = stand_pat; }
+        if stand_pat >= beta {
+            return beta;
+        }
+
+        // Delta Pruning
+        let delta = 975; // Queen value + margin
+        if stand_pat + delta < alpha {
+            return alpha;
+        }
+
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
 
         let mut move_list = MoveList::new();
         movegen::generate_captures(board, &mut move_list);
@@ -488,10 +648,19 @@ impl Searcher {
             }
 
             let m = move_list.iter().nth(i).unwrap().clone();
+
+            if see::see(board, m) < -50 {
+                continue;
+            }
             let undo = board.make_move(m);
-            
-            let us = if board.side_to_move == Color::White { Color::Black } else { Color::White };
-            let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+
+            let us = if board.side_to_move == Color::White {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let king_sq =
+                board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
             if board.is_square_attacked(king_sq, board.side_to_move) {
                 board.unmake_move(m, undo);
                 continue;
@@ -500,12 +669,15 @@ impl Searcher {
             let score = -self.quiescence(board, -beta, -alpha);
             board.unmake_move(m, undo);
 
-            if score >= beta { return beta; }
-            if score > alpha { alpha = score; }
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
         }
         alpha
     }
-
 
     fn get_mvv_lva(&self, m: Move, board: &Board) -> i32 {
         let to = moves::to_sq(m);
@@ -530,8 +702,6 @@ impl Searcher {
         };
         10 * vv - av + 10000
     }
-
-    
 }
 
 fn score_to_tt(score: i32, ply: i32) -> i32 {
