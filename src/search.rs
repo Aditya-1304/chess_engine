@@ -126,11 +126,56 @@ impl Searcher {
         }
 
         // Syzygy DTZ Root Probing
-        if board.occupancy[2].count_ones() <= 6 {
+       if board.occupancy[2].count_ones() <= 6 {
             if let Some(tb) = crate::syzygy::get_global_syzygy() {
                 if board.occupancy[2].count_ones() <= tb.max_pieces() {
-                    // Note: Full DTZ root move extraction is complex.
-                    // For now, we rely on WDL probing in search to guide us to the win.
+                    if let Some((from, to, promo, wdl)) = syzygy::probe_root(board, &tb) {
+                        let mut move_list = MoveList::new();
+                        board.generate_pseudo_legal_moves(&mut move_list);
+
+                        for &m in move_list.iter() {
+                            if moves::from_sq(m) == from && moves::to_sq(m) == to {
+                                let promo_match = if promo > 0 {
+                                    if moves::is_promotion(m) {
+                                        let our_promo = match moves::promotion_piece(m) {
+                                            PieceType::Knight => 1,
+                                            PieceType::Bishop => 2,
+                                            PieceType::Rook => 3,
+                                            PieceType::Queen => 4,
+                                            _ => 0,
+                                        };
+                                        our_promo == promo
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    !moves::is_promotion(m)
+                                };
+
+                                if promo_match {
+                                    let undo = board.make_move(m);
+                                    let us = if board.side_to_move == Color::White {
+                                        Color::Black
+                                    } else {
+                                        Color::White
+                                    };
+                                    let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+                                    let legal = !board.is_square_attacked(king_sq, board.side_to_move);
+                                    board.unmake_move(m, undo);
+
+                                    if legal {
+                                        let tb_score = match wdl {
+                                            1 => 29000,   
+                                            -1 => -29000, 
+                                            _ => 0,       
+                                        };
+                                        println!("info string TB root move: {} (wdl={})", moves::format(m), wdl);
+                                        return (tb_score, Some(m));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -327,7 +372,6 @@ impl Searcher {
             }
         }
 
-        // Check Extension (Must be done BEFORE depth == 0 check)
         let in_check = board.is_square_attacked(
             board.pieces[PieceType::King as usize][board.side_to_move as usize].trailing_zeros()
                 as u8,
@@ -351,7 +395,6 @@ impl Searcher {
 
         let mut tt_move = None;
         if let Some((mv, sc, d, flag)) = self.tt.probe(board.zobrist_hash) {
-            // Verify TT move validity to handle hash collisions/corruption
             let is_valid = if mv != 0 {
                 let from = moves::from_sq(mv);
                 let to = moves::to_sq(mv);
@@ -360,14 +403,13 @@ impl Searcher {
                 } else {
                     let pt = board.piece_type_on(from);
                     if let Some(p) = pt {
-                        // Check if the piece belongs to the side to move
                         (board.pieces[p as usize][board.side_to_move as usize] & (1 << from)) != 0
                     } else {
                         false
                     }
                 }
             } else {
-                true // No move to verify
+                true 
             };
 
             if is_valid {
@@ -556,7 +598,6 @@ impl Searcher {
                 let (s, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
                 score = -s;
             } else {
-                // Improved LMR
                 let mut reduction = 0;
                 if depth >= 3
                     && legal_moves > 1

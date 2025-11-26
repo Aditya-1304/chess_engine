@@ -145,7 +145,7 @@ fn orient(perspective: Color, sq: Square) -> usize {
 }
 
 /// Calculate HalfKP feature index
-/// Index formula: 1 + orient(ksq) * PS_END + ps_index(piece) + orient(sq)
+/// Index formula = 1 + orient(ksq) * PS_END + ps_index(piece) + orient(sq)
 /// The +1 is for BONA_PIECE_ZERO at index 0
 pub fn make_index(perspective: Color, king_sq: Square, piece_sq: Square, pt: PieceType, piece_color: Color) -> usize {
     if pt == PieceType::King {
@@ -166,7 +166,7 @@ pub fn make_index(perspective: Color, king_sq: Square, piece_sq: Square, pt: Pie
         return usize::MAX;
     }
     
-    // Final index: 1 (skip BONA_PIECE_ZERO) + king_sq * 640 + piece_index
+    // Final index = 1 (skip BONA_PIECE_ZERO) + king_sq * 640 + piece_index
     o_ksq * KING_BUCKET_SIZE + 1 + p_idx + o_psq
 }
 
@@ -218,7 +218,6 @@ fn sub_weights(acc: &mut Accumulator, index: usize, weights: &[i16]) {
     }
 }
 
-/// Public API: Update a single feature in an accumulator
 /// Used for incremental updates during make_move
 pub fn update_feature(acc: &mut Accumulator, index: usize, add: bool) {
     let net = match NETWORK.get() {
@@ -539,7 +538,6 @@ pub fn debug_eval(board: &Board) {
     println!("White king sq: {}, Black king sq: {}", wk, bk);
     println!("Side to move: {:?}", board.side_to_move);
     
-    // Count active features
     let mut w_features = 0usize;
     let mut b_features = 0usize;
     

@@ -42,7 +42,6 @@ impl OpeningBook {
       reader.read_exact(&mut buf_key).ok()?;
 
       let entry_key = u64::from_be_bytes(buf_key[0..8].try_into().unwrap());
-      // let entry_move = u16::from_be_bytes(buf[8..10].try_into().unwrap());
 
       if entry_key == hash {
         found_idx = Some(mid);

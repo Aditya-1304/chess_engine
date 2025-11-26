@@ -1,9 +1,9 @@
 use crate::board::Board;
 use crate::movegen;
 use crate::types::{Color, PieceType, Square};
-use pyrrhic_rs::{DtzProbeResult, EngineAdapter, TableBases, WdlProbeResult};
+use pyrrhic_rs::{EngineAdapter, TableBases, WdlProbeResult, DtzProbeValue};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 #[derive(Clone)]
 pub struct SyzygyAdapter;
@@ -59,18 +59,17 @@ pub fn init_global_syzygy(path: &str) {
 }
 
 pub fn auto_load() {
-  if Path::new("syzygy").exists() {
-    init_global_syzygy("syzygy");
-    return;
-  }
-
-  if let Ok(path) = std::env::var("SYZYGY_PATH") {
-    if Path::new(&path).exists() {
-        init_global_syzygy(&path);
+    if Path::new("syzygy").exists() {
+        init_global_syzygy("syzygy");
+        return;
     }
-  }
-}
 
+    if let Ok(path) = std::env::var("SYZYGY_PATH") {
+        if Path::new(&path).exists() {
+            init_global_syzygy(&path);
+        }
+    }
+}
 
 pub fn get_global_syzygy() -> Option<SyzygyTB> {
     let lock = SYZYGY_TB.read().unwrap();
@@ -94,17 +93,12 @@ pub fn probe_wdl(board: &Board, tb: &SyzygyTB) -> Option<WdlProbeResult> {
     let pawns =
         board.pieces[PieceType::Pawn as usize][0] | board.pieces[PieceType::Pawn as usize][1];
 
-    // pyrrhic-rs expects ep as u32 (square index) or 0 if none.
-    // Since 0 is A1 and A1 is not a valid EP square, 0 is safe for None.
     let ep = if let Some(sq) = board.en_passant {
         sq as u32
     } else {
         0
     };
 
-    // pyrrhic-rs: White=1, Black=0.
-    // engine: White=0, Black=1.
-    // We need to pass 'turn' as bool. usually true=White.
     let turn = board.side_to_move == Color::White;
 
     match tb.probe_wdl(
@@ -115,23 +109,50 @@ pub fn probe_wdl(board: &Board, tb: &SyzygyTB) -> Option<WdlProbeResult> {
     }
 }
 
-pub fn probe_dtz(board: &Board, tb: &SyzygyTB) -> Option<DtzProbeResult> {
+/// Probe DTZ at root and return the best move info (from_sq, to_sq, promo, wdl_score)
+pub fn probe_root(board: &Board, tb: &SyzygyTB) -> Option<(u8, u8, u8, i32)> {
     let white = board.occupancy[Color::White as usize];
     let black = board.occupancy[Color::Black as usize];
-    
+
     let kings = board.pieces[PieceType::King as usize][0] | board.pieces[PieceType::King as usize][1];
     let queens = board.pieces[PieceType::Queen as usize][0] | board.pieces[PieceType::Queen as usize][1];
     let rooks = board.pieces[PieceType::Rook as usize][0] | board.pieces[PieceType::Rook as usize][1];
     let bishops = board.pieces[PieceType::Bishop as usize][0] | board.pieces[PieceType::Bishop as usize][1];
     let knights = board.pieces[PieceType::Knight as usize][0] | board.pieces[PieceType::Knight as usize][1];
     let pawns = board.pieces[PieceType::Pawn as usize][0] | board.pieces[PieceType::Pawn as usize][1];
-    
-    let ep = if let Some(sq) = board.en_passant { sq as u32 } else { 0 };
+
+    let ep = board.en_passant.map(|sq| sq as u32).unwrap_or(0);
     let turn = board.side_to_move == Color::White;
     let rule50 = board.halfmove_clock as u32;
 
     match tb.probe_root(white, black, kings, queens, rooks, bishops, knights, pawns, rule50, ep, turn) {
-        Ok(res) => Some(res),
+        Ok(result) => {
+            // Extract from root field
+            match result.root {
+                DtzProbeValue::DtzResult(dtz_result) => {
+                    let from = dtz_result.from_square;
+                    let to = dtz_result.to_square;
+                    let promo = match dtz_result.promotion {
+                        pyrrhic_rs::Piece::Queen => 4,
+                        pyrrhic_rs::Piece::Rook => 3,
+                        pyrrhic_rs::Piece::Bishop => 2,
+                        pyrrhic_rs::Piece::Knight => 1,
+                        _ => 0,
+                    };
+                    let wdl_score = match dtz_result.wdl {
+                        WdlProbeResult::Win => 1,
+                        WdlProbeResult::CursedWin => 1,
+                        WdlProbeResult::Loss => -1,
+                        WdlProbeResult::BlessedLoss => -1,
+                        WdlProbeResult::Draw => 0,
+                    };
+                    Some((from, to, promo, wdl_score))
+                }
+                DtzProbeValue::Checkmate => None, 
+                DtzProbeValue::Stalemate => None, 
+                DtzProbeValue::Failed => None,
+            }
+        }
         Err(_) => None,
     }
 }

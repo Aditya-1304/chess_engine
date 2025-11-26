@@ -153,9 +153,6 @@ mod tests {
     fn test_see_winning_exchange() {
         movegen::init();
         
-        // RxN where knight is defended by pawn - should be positive (Knight 320 - Rook 500 + Pawn recaptures... wait)
-        // Actually: White Rook takes Black Knight (320), Black pawn retakes (-500)
-        // Net for white: 320 - 500 = -180, so this should be negative
         let board = Board::from_fen("4k3/8/3p4/4n3/8/8/4R3/4K3 w - - 0 1").unwrap();
         let m = moves::new(12, 36, moves::CAPTURE_FLAG); // Re2xe5
         let see_val = see(&board, m);
@@ -165,8 +162,7 @@ mod tests {
     #[test]
     fn test_see_equal_exchange() {
         movegen::init();
-        
-        // Knight takes knight
+    
         let board = Board::from_fen("4k3/8/8/4n3/8/8/4N3/4K3 w - - 0 1").unwrap();
         let m = moves::new(12, 36, moves::CAPTURE_FLAG); // Ne2xe5
         let see_val = see(&board, m);

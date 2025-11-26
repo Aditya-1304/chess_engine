@@ -1,36 +1,36 @@
 use std::fmt;
 
 use crate::{
-    movegen,
-    moves::{self, Move, MoveList},
-    nnue,
-    types::{Accumulator, Bitboard, Color, PieceType, Square},
-    zobrist,
+  movegen,
+  moves::{self, Move, MoveList},
+  nnue,
+  types::{Accumulator, Bitboard, Color, PieceType, Square},
+  zobrist,
 };
 
 pub type ZHash = u64;
 
 #[derive(Clone, Debug)]
 pub struct UndoInfo {
-    pub old_castling_rights: u8,
-    pub old_en_passant: Option<Square>,
-    pub old_halfmove_clock: u8,
-    pub captured_piece_type: Option<PieceType>,
-    pub old_zobrist_hash: ZHash,
+  pub old_castling_rights: u8,
+  pub old_en_passant: Option<Square>,
+  pub old_halfmove_clock: u8,
+  pub captured_piece_type: Option<PieceType>,
+  pub old_zobrist_hash: ZHash,
 }
 
 #[derive(Clone)]
 pub struct Board {
-    pub pieces: [[Bitboard; 2]; 6],
-    pub occupancy: [Bitboard; 3],
-    pub side_to_move: Color,
-    pub castling_rights: u8,
-    pub en_passant: Option<Square>,
-    pub halfmove_clock: u8,
-    pub fullmove_number: u32,
-    pub zobrist_hash: ZHash,
-    pub history: Vec<UndoInfo>,
-    pub accumulator: [Accumulator; 2],
+  pub pieces: [[Bitboard; 2]; 6],
+  pub occupancy: [Bitboard; 3],
+  pub side_to_move: Color,
+  pub castling_rights: u8,
+  pub en_passant: Option<Square>,
+  pub halfmove_clock: u8,
+  pub fullmove_number: u32,
+  pub zobrist_hash: ZHash,
+  pub history: Vec<UndoInfo>,
+  pub accumulator: [Accumulator; 2],
 }
 
 const WK_CASTLE: u8 = 0b0001;
@@ -39,70 +39,70 @@ const BK_CASTLE: u8 = 0b0100;
 const BQ_CASTLE: u8 = 0b1000;
 
 static CASTLE_MASK: [u8; 64] = [
-    !WQ_CASTLE,
-    0xFF,
-    0xFF,
-    0xFF,
-    !(WK_CASTLE | WQ_CASTLE),
-    0xFF,
-    0xFF,
-    !WK_CASTLE,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    0xFF,
-    !BQ_CASTLE,
-    0xFF,
-    0xFF,
-    0xFF,
-    !(BK_CASTLE | BQ_CASTLE),
-    0xFF,
-    0xFF,
-    !BK_CASTLE,
+  !WQ_CASTLE,
+  0xFF,
+  0xFF,
+  0xFF,
+  !(WK_CASTLE | WQ_CASTLE),
+  0xFF,
+  0xFF,
+  !WK_CASTLE,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  !BQ_CASTLE,
+  0xFF,
+  0xFF,
+  0xFF,
+  !(BK_CASTLE | BQ_CASTLE),
+  0xFF,
+  0xFF,
+  !BK_CASTLE,
 ];
 
 impl Board {
@@ -110,7 +110,7 @@ impl Board {
         let mut board = Board::default();
         let parts: Vec<&str> = fen.split_whitespace().collect();
         if parts.len() != 6 {
-            return Err("Invalid FEN: must have 6 fields");
+          return Err("Invalid FEN: must have 6 fields");
         }
 
         let piece_placement = parts[0];
@@ -361,7 +361,7 @@ impl Board {
             None
         };
 
-        // 1. SAVE STATE (Optimized: No Accumulator Copy)
+        // Save State
         let undo = UndoInfo {
             old_castling_rights: self.castling_rights,
             old_en_passant: self.en_passant,
@@ -371,17 +371,15 @@ impl Board {
         };
         self.history.push(undo.clone());
 
-        // 2. NNUE Incremental Updates
-        // We do this BEFORE board changes for make_move
+        // NNUE Incremental Updates
         if nnue::NETWORK.get().is_some() {
             if moving_piece == PieceType::King {
-                // King move: Will refresh AFTER board update
             } else {
                 self.apply_nnue_updates(m, moving_piece, captured, us, them, true);
             }
         }
 
-        // 3. Update Board State
+        // Update Board State
         hash ^= keys.side_to_move;
         if let Some(sq) = self.en_passant {
             let capturers = self.pieces[PieceType::Pawn as usize][us as usize];
@@ -469,7 +467,6 @@ impl Board {
         let _ = self.history.pop();
         self.zobrist_hash = undo.old_zobrist_hash;
 
-        // Restore board state first
         let from = moves::from_sq(m);
         let to = moves::to_sq(m);
         let flag = moves::flag(m);
@@ -512,24 +509,16 @@ impl Board {
             }
         }
 
-        // NNUE Reversal (After board restore, so we are back to pre-move state)
         if nnue::NETWORK.get().is_some() {
             if moving_piece == PieceType::King {
-                // King move: Full refresh (since we can't easily reverse a full refresh)
+
                 self.accumulator = nnue::refresh_accumulator(self);
             } else {
-                // Reverse updates: pass add=false to subtract what was added, and add what was removed
-                // Actually apply_nnue_updates takes 'add' as the direction of the move.
-                // To reverse, we want to UNDO the operations.
-                // apply_nnue_updates(..., false) will REVERSE the operations.
                 self.apply_nnue_updates(m, moving_piece, undo.captured_piece_type, us, them, false);
             }
         }
     }
 
-    // Helper to apply NNUE updates.
-    // If `forward` is true, it applies updates for making a move.
-    // If `forward` is false, it applies updates for unmaking a move (reversing).
     #[inline(always)]
     fn apply_nnue_updates(
         &mut self,
@@ -540,7 +529,7 @@ impl Board {
         them: Color,
         forward: bool,
     ) {
-        // Get king squares for each perspective
+
         let wk_sq = self.pieces[PieceType::King as usize][Color::White as usize].trailing_zeros() as u8;
         let bk_sq = self.pieces[PieceType::King as usize][Color::Black as usize].trailing_zeros() as u8;
 
@@ -551,11 +540,10 @@ impl Board {
         let mut updates = [(0u8, PieceType::Pawn, Color::White, false); 8];
         let mut count = 0;
 
-        // 1. Remove 'from' piece
         updates[count] = (from, moving_piece, us, false);
         count += 1;
 
-        // 2. Handle Capture
+        // Capture handking
         if let Some(cap_pt) = captured {
             if flag == moves::EN_PASSANT_CAPTURE_FLAG {
                 let cap_sq = if us == Color::White { to - 8 } else { to + 8 };
@@ -567,7 +555,6 @@ impl Board {
             }
         }
 
-        // 3. Add 'to' piece
         if moves::is_promotion(m) {
             updates[count] = (to, moves::promotion_piece(m), us, true);
             count += 1;
@@ -576,7 +563,7 @@ impl Board {
             count += 1;
         }
 
-        // 4. Handle Castling
+        // Castle handling
         if flag == moves::KING_CASTLE_FLAG {
             let (r_from, r_to) = if us == Color::White { (7, 5) } else { (63, 61) };
             updates[count] = (r_from, PieceType::Rook, us, false);
@@ -591,7 +578,6 @@ impl Board {
             count += 1;
         }
 
-        // Apply updates - use correct king for each perspective
         for i in 0..count {
             let (sq, pt, color, is_add) = updates[i];
             let final_add = if forward { is_add } else { !is_add };
