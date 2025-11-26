@@ -540,15 +540,14 @@ impl Board {
         them: Color,
         forward: bool,
     ) {
-        let k_sq_us = self.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
-        let k_sq_them = self.pieces[PieceType::King as usize][them as usize].trailing_zeros() as u8;
+        // Get king squares for each perspective
+        let wk_sq = self.pieces[PieceType::King as usize][Color::White as usize].trailing_zeros() as u8;
+        let bk_sq = self.pieces[PieceType::King as usize][Color::Black as usize].trailing_zeros() as u8;
 
         let from = moves::from_sq(m);
         let to = moves::to_sq(m);
         let flag = moves::flag(m);
 
-        // We use a fixed-size array to avoid allocation
-        // Max updates: 1 (remove from) + 1 (add to) + 1 (capture) + 2 (castle) = 5.
         let mut updates = [(0u8, PieceType::Pawn, Color::White, false); 8];
         let mut count = 0;
 
@@ -592,19 +591,18 @@ impl Board {
             count += 1;
         }
 
-        // Apply updates
+        // Apply updates - use correct king for each perspective
         for i in 0..count {
             let (sq, pt, color, is_add) = updates[i];
-
-            // If forward=true: add=is_add.
-            // If forward=false: add=!is_add (reverse operation)
             let final_add = if forward { is_add } else { !is_add };
 
-            let idx_them = nnue::halfkp_index(k_sq_them, sq, pt, color, them);
-            nnue::update_feature(&mut self.accumulator[them as usize], idx_them, final_add);
+            // White's accumulator uses white king
+            let idx_w = nnue::halfkp_index(wk_sq, sq, pt, color, Color::White);
+            nnue::update_feature(&mut self.accumulator[0], idx_w, final_add);
 
-            let idx_us = nnue::halfkp_index(k_sq_us, sq, pt, color, us);
-            nnue::update_feature(&mut self.accumulator[us as usize], idx_us, final_add);
+            // Black's accumulator uses black king
+            let idx_b = nnue::halfkp_index(bk_sq, sq, pt, color, Color::Black);
+            nnue::update_feature(&mut self.accumulator[1], idx_b, final_add);
         }
     }
 
@@ -665,8 +663,17 @@ impl Board {
         let old_ep = self.en_passant;
 
         if let Some(ep) = self.en_passant {
+          let them = if self.side_to_move == Color::White {
+            Color::Black
+          } else {
+            Color::White
+          };
+          let our_pawns = self.pieces[PieceType::Pawn as usize][self.side_to_move as usize];
+
+          if (movegen::pawn_attacks(them, ep) & our_pawns) != 0 {
             self.zobrist_hash ^= keys.en_passant_file[(ep % 8) as usize];
-            self.en_passant = None;
+          }   
+          self.en_passant = None;
         }
 
         self.zobrist_hash ^= keys.side_to_move;
@@ -691,8 +698,17 @@ impl Board {
         self.zobrist_hash ^= keys.side_to_move;
 
         if let Some(ep) = old_ep {
-            self.en_passant = Some(ep);
+
+          let them = if self.side_to_move == Color::White {
+            Color::Black
+          } else {
+              Color::White
+          };
+          let our_pawn = self.pieces[PieceType::Pawn as usize][self.side_to_move as usize];
+          if (movegen::pawn_attacks(them, ep) & our_pawn) != 0 {
             self.zobrist_hash ^= keys.en_passant_file[(ep % 8) as usize];
+          }
+            self.en_passant = Some(ep);
         }
     }
 }

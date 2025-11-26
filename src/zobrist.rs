@@ -15,7 +15,6 @@ static ZOBRIST_KEYS: OnceLock<ZobristKeys> = OnceLock::new();
 
 impl ZobristKeys {
   fn new() -> Self {
-    // let mut rng = StdRng::seed_from_u64(1070373371371371371);
     let mut pieces = [[[0; 64]; 2]; 6];
     for pt_idx in 0..6 {
       for c_idx in 0..2 {

@@ -90,6 +90,17 @@ impl MoveList {
   pub fn as_mut_slice(&mut self) -> &mut [Move] {
     &mut self.moves[..self.count]
   }
+
+  #[inline]
+  pub fn get(&self, index: usize) -> Move {
+    self.moves[index]
+  }
+  
+  #[inline]
+  pub fn set(&mut self, index: usize, m: Move) {
+    self.moves[index] = m;
+  }
+
 }
 
 pub fn format_square(sq: Square) -> String {

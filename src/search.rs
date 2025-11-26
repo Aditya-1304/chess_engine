@@ -1,11 +1,5 @@
 use crate::{
-    board::Board,
-    book::OpeningBook,
-    eval, movegen,
-    moves::{self, Move, MoveList},
-    see,
-    tt::{TTFlag, TranspositionTable},
-    types::{Color, PieceType},
+    board::Board, book::OpeningBook, eval, movegen, moves::{self, Move, MoveList}, see, syzygy, tt::{TTFlag, TranspositionTable}, types::{Color, PieceType}
 };
 use std::time::Instant;
 
@@ -22,6 +16,8 @@ pub struct Searcher {
     pub book: OpeningBook,
     pub killers: [[Option<Move>; 2]; 64],
     pub history: [[[i32; 64]; 2]; 6],
+    pub counter_moves: [[Option<Move>; 64]; 6],
+    pub prev_move: Option<Move>,
 }
 
 impl Searcher {
@@ -50,6 +46,8 @@ impl Searcher {
             book,
             killers: [[None; 2]; 64],
             history: [[[0; 64]; 2]; 6],
+            counter_moves: [[None; 64]; 6],
+            prev_move: None,
         }
     }
 
@@ -59,6 +57,7 @@ impl Searcher {
         self.stop = false;
         self.tt.new_search();
         self.killers = [[None; 2]; 64];
+        self.age_history();
 
         if self.time_soft_limit == 0 {
             self.time_soft_limit = u128::MAX;
@@ -183,6 +182,9 @@ impl Searcher {
                     delta += delta / 2;
                 } else if s >= beta {
                     // Fail high: widen beta upwards
+                    if let Some(mv) = m {
+                        best_move = Some(mv);
+                    }
                     beta = (INF).min(beta + delta);
                     delta += delta / 2;
                 } else {
@@ -292,22 +294,34 @@ impl Searcher {
 
         // Syzygy Probing
         if !is_root && board.occupancy[2].count_ones() <= 6 {
-            if let Some(tb) = crate::syzygy::get_global_syzygy() {
+            if let Some(tb) = syzygy::get_global_syzygy() {
                 if board.occupancy[2].count_ones() <= tb.max_pieces() {
-                    if let Some(wdl) = crate::syzygy::probe_wdl(board, &tb) {
+                    if let Some(wdl) = syzygy::probe_wdl(board, &tb) {
                         let tb_score = match wdl {
                             pyrrhic_rs::WdlProbeResult::Win => 30000 - ply,
                             pyrrhic_rs::WdlProbeResult::Loss => -30000 + ply,
                             _ => 0,
                         };
 
-                        if tb_score >= beta {
-                            return (tb_score, None);
+                        match wdl {
+                            pyrrhic_rs::WdlProbeResult::Win => {
+                                if tb_score >= beta {
+                                    return (tb_score, None);
+                                }
+                            }
+
+                            pyrrhic_rs::WdlProbeResult::Loss => {
+                                if tb_score <= alpha {
+                                    return (tb_score, None);
+                                }
+                            }
+
+                            _ => {
+                                if tb_score >= beta || tb_score <= alpha {
+                                    return (tb_score, None);
+                                }
+                            }
                         }
-                        if tb_score <= alpha {
-                            return (tb_score, None);
-                        }
-                        return (tb_score, None);
                     }
                 }
             }
@@ -379,26 +393,56 @@ impl Searcher {
 
         // Adaptive Null Move Pruning
         if do_null && !in_check && !is_root && depth >= 3 {
-            let static_eval = eval::evaluate(board);
-            if static_eval >= beta {
-                let r = if depth > 6 { 3 } else { 2 };
-                let old_ep = board.make_null_move();
-                let (score, _) =
-                    self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
-                board.unmake_null_move(old_ep);
-                if -score >= beta {
-                    return (beta, None);
+            // Check we have non-pawn material
+            let dominated_by_pawns = 
+                (board.pieces[PieceType::Knight as usize][board.side_to_move as usize] |
+                 board.pieces[PieceType::Bishop as usize][board.side_to_move as usize] |
+                 board.pieces[PieceType::Rook as usize][board.side_to_move as usize] |
+                 board.pieces[PieceType::Queen as usize][board.side_to_move as usize]) == 0;
+            
+            if !dominated_by_pawns {
+                let static_eval = eval::evaluate(board);
+                if static_eval >= beta {
+                    let r = if depth > 6 { 3 } else { 2 };
+                    let old_ep = board.make_null_move();
+                    let (score, _) =
+                        self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
+                    board.unmake_null_move(old_ep);
+                    let null_score = -score;
+                    // Don't trust mate scores from null move
+                    if null_score >= beta && null_score < 30000 {
+                        return (beta, None);
+                    }
                 }
             }
         }
+
+        if !is_root && !in_check&& depth <= 6 {
+            let static_eval = eval::evaluate(board);
+            let margin = 80 * (depth as i32);
+            if static_eval - margin >= beta {
+                return (static_eval - margin, None);
+            }
+        }
+
+        if tt_move.is_none() && depth >= 4 {
+            let iid_depth = depth - 2;
+            let (_, iid_move) = self.negamax(board, iid_depth, ply, alpha, beta, false);
+            if let Some(m) = iid_move {
+                tt_move = Some(m);
+            }
+        }
+
+        
 
         let mut move_list = MoveList::new();
         board.generate_pseudo_legal_moves(&mut move_list);
 
         // Score moves ONCE
         let mut move_scores = [0; 256];
-        for i in 0..move_list.len() {
-            let m = move_list.iter().nth(i).unwrap().clone();
+        let move_slice = move_list.as_mut_slice();
+        for i in 0..move_slice.len() {
+            let m = move_slice[i];
             if Some(m) == tt_move {
                 move_scores[i] = 2000000000;
             } else if moves::is_capture(m) {
@@ -411,6 +455,16 @@ impl Searcher {
                         move_scores[i] = 800000;
                     }
                 }
+
+                if let Some(prev) = self.prev_move{
+                    let prev_pt = board.piece_type_on(moves::to_sq(prev));
+                    if let Some(ppt) = prev_pt {
+                        let prev_to = moves::to_sq(prev);
+                        if self.counter_moves[ppt as usize][prev_to as usize] == Some(m) {
+                            move_scores[i] = 700000;
+                        }
+                    }
+                }
                 if move_scores[i] == 0 {
                     let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
                     let c = board.side_to_move;
@@ -419,6 +473,8 @@ impl Searcher {
                 }
             }
         }
+
+        
 
         // Futility Pruning Setup
         let mut futility_pruning = false;
@@ -435,6 +491,8 @@ impl Searcher {
         let mut legal_moves = 0;
         let mut skipped_moves = 0;
         let alpha_orig = alpha;
+        let mut searched_quiets: [Move; 64] = [0; 64];
+        let mut quiet_count = 0;
 
         for i in 0..move_list.len() {
             // Selection Sort
@@ -459,6 +517,13 @@ impl Searcher {
                 skipped_moves += 1;
                 continue;
             }
+
+            let lmp_threshold = if depth <= 1 { 3 } else if depth <= 2 { 6 } else if depth <= 3 { 10 } else { 15 };
+            if !is_root && !in_check && depth <= 4 && legal_moves > lmp_threshold 
+                && !moves::is_capture(m) && !moves::is_promotion(m) {
+                continue;
+            }
+
 
             if !is_root && depth >= 1 && moves::is_capture(m) && legal_moves > 0 {
                 let see_value = see::see(board, m);
@@ -485,6 +550,8 @@ impl Searcher {
             legal_moves += 1;
 
             let mut score;
+            let old_prev = self.prev_move;
+            self.prev_move = Some(m);
             if legal_moves == 1 {
                 let (s, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
                 score = -s;
@@ -525,9 +592,15 @@ impl Searcher {
                 }
             }
 
+            self.prev_move = old_prev;
             board.unmake_move(m, undo);
             if self.stop {
                 return (0, None);
+            }
+
+            if !moves::is_capture(m) && quiet_count < 64 {
+                searched_quiets[quiet_count] = m;
+                quiet_count += 1;
             }
 
             if score > best_score {
@@ -554,10 +627,33 @@ impl Searcher {
             if alpha >= beta {
                 if !moves::is_capture(m) {
                     let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
-                    let c = us;
+                    let c = board.side_to_move;
                     let to = moves::to_sq(m);
                     self.history[pt as usize][c as usize][to as usize] +=
                         (depth as i32) * (depth as i32);
+
+                    if self.history[pt as usize][c as usize][to as usize] > 20000 {
+                        self.history[pt as usize][c as usize][to as usize] /= 2;
+                    }
+
+                    for j in 0..quiet_count.saturating_sub(1){
+                        let failed_m = searched_quiets[j];
+                        if let Some(pt) = board.piece_type_on(moves::from_sq(failed_m)) {
+                            let to = moves::to_sq(failed_m);
+                            self.history[pt as usize][board.side_to_move as usize][to as usize] -= (depth as i32) * (depth as i32);
+                            if self.history[pt as usize][board.side_to_move as usize][to as usize] < -20000 {
+                                self.history[pt as usize][board.side_to_move as usize][to as usize] = -20000;
+                            }
+                        }
+                    }
+
+                    if let Some(prev) = old_prev {
+                        if let Some(prev_pt) = board.piece_type_on(moves::to_sq(prev)) {
+                            let prev_to = moves::to_sq(prev);
+                            self.counter_moves[prev_pt as usize][prev_to as usize] = Some(m);
+                        }
+                    }
+
                     if ply < 64 && self.killers[ply as usize][0] != Some(m) {
                         self.killers[ply as usize][1] = self.killers[ply as usize][0];
                         self.killers[ply as usize][0] = Some(m);
@@ -584,9 +680,16 @@ impl Searcher {
         } else {
             TTFlag::Exact
         };
+
+        let move_to_store = if flag == TTFlag::Alpha {
+            None 
+        } else {
+            best_move
+        };
+
         self.tt.store(
             board.zobrist_hash,
-            best_move,
+            move_to_store,
             score_to_tt(best_score, ply),
             depth,
             flag,
@@ -628,7 +731,7 @@ impl Searcher {
         // Simple sort for qsearch
         let mut move_scores = [0; 256];
         for i in 0..move_list.len() {
-            let m = move_list.iter().nth(i).unwrap().clone();
+            let m = move_list.get(i);
             move_scores[i] = 1000000 + self.get_mvv_lva(m, board);
         }
 
@@ -647,7 +750,7 @@ impl Searcher {
                 move_scores.swap(i, best_pick_idx);
             }
 
-            let m = move_list.iter().nth(i).unwrap().clone();
+            let m = move_list.get(i);
 
             if see::see(board, m) < -50 {
                 continue;
@@ -677,6 +780,16 @@ impl Searcher {
             }
         }
         alpha
+    }
+
+    fn age_history(&mut self) {
+        for pt in 0..6 {
+            for c in 0..2 {
+                for sq in 0..64 {
+                    self.history[pt][c][sq] /= 2;
+                }
+            }
+        }
     }
 
     fn get_mvv_lva(&self, m: Move, board: &Board) -> i32 {

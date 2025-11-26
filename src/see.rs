@@ -144,8 +144,32 @@ mod tests {
         movegen::init();
         
         let board = Board::from_fen("4k3/8/4p3/3p4/8/8/3Q4/4K3 w - - 0 1").unwrap();
-        let m = moves::new(11, 27, moves::CAPTURE_FLAG); // Qd2xd5
+        let m = moves::new(11, 35, moves::CAPTURE_FLAG); // Qd2xd5
         let see_val = see(&board, m);
         assert!(see_val < 0, "Queen taking defended pawn should be negative, got {}", see_val);
+    }
+    
+    #[test]
+    fn test_see_winning_exchange() {
+        movegen::init();
+        
+        // RxN where knight is defended by pawn - should be positive (Knight 320 - Rook 500 + Pawn recaptures... wait)
+        // Actually: White Rook takes Black Knight (320), Black pawn retakes (-500)
+        // Net for white: 320 - 500 = -180, so this should be negative
+        let board = Board::from_fen("4k3/8/3p4/4n3/8/8/4R3/4K3 w - - 0 1").unwrap();
+        let m = moves::new(12, 36, moves::CAPTURE_FLAG); // Re2xe5
+        let see_val = see(&board, m);
+        assert!(see_val < 0, "RxN defended by pawn should be losing, got {}", see_val);
+    }
+    
+    #[test]
+    fn test_see_equal_exchange() {
+        movegen::init();
+        
+        // Knight takes knight
+        let board = Board::from_fen("4k3/8/8/4n3/8/8/4N3/4K3 w - - 0 1").unwrap();
+        let m = moves::new(12, 36, moves::CAPTURE_FLAG); // Ne2xe5
+        let see_val = see(&board, m);
+        assert_eq!(see_val, 320, "NxN undefended should be +320, got {}", see_val);
     }
 }

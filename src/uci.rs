@@ -34,6 +34,10 @@ pub fn main_loop() {
             }
         } else if cmd == "ucinewgame" {
             searcher.tt.clear();
+            searcher.history = [[[0; 64];2]; 6];
+            searcher.killers = [[None; 2]; 64];
+            searcher.counter_moves = [[None; 64]; 6];
+            searcher.prev_move = None;
         } else if cmd.starts_with("position") {
             parse_position(cmd, &mut board);
         } else if cmd.starts_with("go") {

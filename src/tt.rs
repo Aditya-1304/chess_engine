@@ -73,7 +73,6 @@ impl TranspositionTable {
     for i in 0..4 {
       let entry = &cluster.entries[i];
       if entry.key == key {
-        let _mv = if entry.move_best == 0 { None } else { Some(entry.move_best) };
         let flag = match entry.flag {
             0 => TTFlag::Exact,
             1 => TTFlag::Alpha,
