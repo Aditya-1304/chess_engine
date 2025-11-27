@@ -10,12 +10,12 @@ use crate::{
 
 pub type ZHash = u64;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub struct UndoInfo {
   pub old_castling_rights: u8,
   pub old_en_passant: Option<Square>,
   pub old_halfmove_clock: u8,
-  pub captured_piece_type: Option<PieceType>,
+  pub captured_piece: u8,
   pub old_zobrist_hash: ZHash,
 }
 
@@ -384,14 +384,14 @@ impl Board {
         } else {
             None
         };
+        let captured_byte = if let Some(pt) = captured { pt as u8 } else { 6 }; // 6 = None
 
-        // Save State
         let undo = UndoInfo {
-            old_castling_rights: self.castling_rights,
-            old_en_passant: self.en_passant,
-            old_halfmove_clock: self.halfmove_clock,
-            captured_piece_type: captured,
-            old_zobrist_hash: self.zobrist_hash,
+        old_castling_rights: self.castling_rights,
+        old_en_passant: self.en_passant,
+        old_halfmove_clock: self.halfmove_clock,
+        captured_piece: captured_byte,
+        old_zobrist_hash: self.zobrist_hash,
         };
         self.history.push(undo.clone());
 
@@ -532,7 +532,9 @@ impl Board {
             self.king_sq[us as usize] = from;
         }
 
-        if let Some(cap_pt) = undo.captured_piece_type {
+        let captured_piece_type = if undo.captured_piece == 6 { None } else { Some(PieceType::from(undo.captured_piece as usize)) };
+
+        if let Some(cap_pt) = captured_piece_type {
             if flag == moves::EN_PASSANT_CAPTURE_FLAG {
                 let cap_sq = if us == Color::White { to - 8 } else { to + 8 };
                 self.add_piece(PieceType::Pawn, them, cap_sq);
@@ -543,15 +545,14 @@ impl Board {
 
         if nnue::is_enabled() {
             if moving_piece == PieceType::King {
-
                 self.accumulator = nnue::refresh_accumulator(self);
             } else {
-                self.apply_nnue_updates(m, moving_piece, undo.captured_piece_type, us, them, false);
+                self.apply_nnue_updates(m, moving_piece, captured_piece_type, us, them, false);
             }
         }
     }
 
-        #[inline(always)]
+    #[inline(always)]
     fn apply_nnue_updates(
         &mut self,
         m: Move,

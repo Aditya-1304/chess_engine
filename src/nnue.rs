@@ -1,14 +1,10 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::board::Board;
 use crate::types::{Accumulator, Color, PieceType, Square};
 
-static USE_AVX2: AtomicBool = AtomicBool::new(false);
-static CPU_FEATURES_CHECKED: AtomicBool = AtomicBool::new(false);
-static NNUE_ENABLED: AtomicBool = AtomicBool::new(false);
 static mut NETWORK_PTR: *const Network = std::ptr::null();
 static mut CACHED_USE_AVX2: bool = false;
 static mut CACHED_NNUE_ENABLED: bool = false;
@@ -18,10 +14,9 @@ const INPUT_SIZE: usize = 41024;
 const HALF_DIMENSIONS: usize = 256;
 const L2_SIZE: usize = 32;
 const L3_SIZE: usize = 32;
-
-// Quantization constants from Stockfish
 const FV_SCALE: i32 = 16;
 const WEIGHT_SCALE_BITS: i32 = 6;
+
 const PS_W_PAWN: usize = 0;
 const PS_B_PAWN: usize = 1 * 64;
 const PS_W_KNIGHT: usize = 2 * 64;
@@ -129,7 +124,6 @@ pub fn is_enabled() -> bool {
 
 pub fn init_cpu_features() {
     if let Some(net) = NETWORK.get() {
-        NNUE_ENABLED.store(true, Ordering::Relaxed);
         unsafe {
             NETWORK_PTR = net as *const Network;
             CACHED_NNUE_ENABLED = true;
@@ -138,11 +132,9 @@ pub fn init_cpu_features() {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
-            USE_AVX2.store(true, Ordering::Relaxed);
             unsafe { CACHED_USE_AVX2 = true }
         }
     }
-    CPU_FEATURES_CHECKED.store(true, Ordering::Relaxed);
 }
 
 #[inline(always)]
@@ -315,32 +307,49 @@ unsafe fn update_feature_batch_avx2(
 ) {
     use std::arch::x86_64::*;
 
+    // Separate adds and subs to remove branching in the hot loop
+    let mut add_indices = [0usize; 16];
+    let mut sub_indices = [0usize; 16];
+    let mut add_count = 0;
+    let mut sub_count = 0;
+
+    for &(idx, add) in updates {
+        if idx != usize::MAX && idx < INPUT_SIZE {
+            let offset = idx * HALF_DIMENSIONS;
+            if add {
+                add_indices[add_count] = offset;
+                add_count += 1;
+            } else {
+                sub_indices[sub_count] = offset;
+                sub_count += 1;
+            }
+        }
+    }
+
     let acc_ptr = acc.values.as_mut_ptr();
     let w_ptr = weights.as_ptr();
 
-    // Process 16 i16 values at a time (256 bits)
-    for i in (0..HALF_DIMENSIONS).step_by(16) {
-        let mut sum = unsafe {
-        _mm256_loadu_si256(acc_ptr.add(i) as *const __m256i)
-        };
+    // Process 16 i16 values (256 bits) per iteration
+    unsafe { 
+        for i in (0..HALF_DIMENSIONS).step_by(16) {
+            let mut sum = _mm256_load_si256(acc_ptr.add(i) as *const __m256i);
 
-        for &(index, add) in updates {
-            if index == usize::MAX || index >= INPUT_SIZE {
-                continue;
-            }
-            let offset = index * HALF_DIMENSIONS;
-            let w = unsafe {
-                _mm256_loadu_si256(w_ptr.add(offset + i) as *const __m256i)
-            }; 
-
-            if add {
+            // Apply Additions (No branching!)
+            for k in 0..add_count {
+                let offset = *add_indices.get_unchecked(k);
+                let w = _mm256_loadu_si256(w_ptr.add(offset + i) as *const __m256i);
                 sum = _mm256_adds_epi16(sum, w);
-            } else {
+            }
+
+            // Apply Subtractions (No branching!)
+            for k in 0..sub_count {
+                let offset = *sub_indices.get_unchecked(k);
+                let w = _mm256_loadu_si256(w_ptr.add(offset + i) as *const __m256i);
                 sum = _mm256_subs_epi16(sum, w);
             }
-        }
 
-       unsafe { _mm256_storeu_si256(acc_ptr.add(i) as *mut __m256i, sum); }
+            _mm256_store_si256(acc_ptr.add(i) as *mut __m256i, sum);
+        }
     }
 }
 
@@ -381,51 +390,95 @@ unsafe fn sub_weights_avx2(acc: &mut Accumulator, weights: &[i16]) {
     }
 }
 
-/// Refresh both accumulators from scratch
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_weights_avx2_direct(acc: &mut Accumulator, weights: &[i16], offset: usize) {
+    use std::arch::x86_64::*;
+    
+    let acc_ptr = acc.values.as_mut_ptr();
+    let w_ptr = unsafe {
+        weights.as_ptr().add(offset)
+    };
+    unsafe {
+        for i in (0..HALF_DIMENSIONS).step_by(16) {
+            let a = _mm256_load_si256(acc_ptr.add(i) as *const __m256i);
+            let w = _mm256_loadu_si256(w_ptr.add(i) as *const __m256i);
+            let sum = _mm256_adds_epi16(a, w);
+            _mm256_store_si256(acc_ptr.add(i) as *mut __m256i, sum);
+        }
+    }
+}
+
 pub fn refresh_accumulator(board: &Board) -> [Accumulator; 2] {
-    let net = match NETWORK.get() {
-        Some(n) => n,
-        None => return [Accumulator::default(); 2],
+    let net = match NETWORK.get() { 
+        Some(n) => n, 
+        None => return [Accumulator::default(); 2] 
     };
     
     let mut accs = [Accumulator::default(); 2];
-    
-    // Get king squares
-    let wk_bb = board.pieces[PieceType::King as usize][Color::White as usize];
-    let bk_bb = board.pieces[PieceType::King as usize][Color::Black as usize];
-    
-    if wk_bb == 0 || bk_bb == 0 {
-        return accs;
-    }
-    
-    let wk_sq = wk_bb.trailing_zeros() as u8;
-    let bk_sq = bk_bb.trailing_zeros() as u8;
-    
     accs[0].values.copy_from_slice(&net.ft_biases);
     accs[1].values.copy_from_slice(&net.ft_biases);
-    
+
+    let wk_sq = board.king_sq[Color::White as usize];
+    let bk_sq = board.king_sq[Color::Black as usize];
+
+    #[cfg(target_arch = "x86_64")]
+    if use_avx2() {
+        unsafe {
+            for pt_idx in 0..5 {
+                let pt = PieceType::from(pt_idx);
+                for c_idx in 0..2 {
+                    let pc = if c_idx == 0 { Color::White } else { Color::Black };
+                    let mut bb = board.pieces[pt_idx][c_idx];
+                    while bb != 0 {
+                        let sq = bb.trailing_zeros() as u8;
+                        bb &= bb - 1;
+                        
+                        let idx_w = make_index(Color::White, wk_sq, sq, pt, pc);
+                        let idx_b = make_index(Color::Black, bk_sq, sq, pt, pc);
+                        
+                        if idx_w != usize::MAX {
+                            add_weights_avx2_direct(&mut accs[0], &net.ft_weights, idx_w * HALF_DIMENSIONS);
+                        }
+                        if idx_b != usize::MAX {
+                            add_weights_avx2_direct(&mut accs[1], &net.ft_weights, idx_b * HALF_DIMENSIONS);
+                        }
+                    }
+                }
+            }
+        }
+        return accs;
+    }
+
+    // Scalar fallback
     for pt_idx in 0..5 {
         let pt = PieceType::from(pt_idx);
-
-        for color_idx in 0..2 {
-            let pc = if color_idx == 0 { Color::White } else { Color::Black };
-            let mut bb = board.pieces[pt_idx][color_idx];
-            
+        for c_idx in 0..2 {
+            let pc = if c_idx == 0 { Color::White } else { Color::Black };
+            let mut bb = board.pieces[pt_idx][c_idx];
             while bb != 0 {
                 let sq = bb.trailing_zeros() as u8;
                 bb &= bb - 1;
                 
-                // White's accumulator (uses white king position)
                 let idx_w = make_index(Color::White, wk_sq, sq, pt, pc);
-                add_weights(&mut accs[0], idx_w, &net.ft_weights);
-                
-                // Black's accumulator (uses black king position)
                 let idx_b = make_index(Color::Black, bk_sq, sq, pt, pc);
-                add_weights(&mut accs[1], idx_b, &net.ft_weights);
+                
+                if idx_w != usize::MAX {
+                    let off = idx_w * HALF_DIMENSIONS;
+                    for i in 0..HALF_DIMENSIONS {
+                        accs[0].values[i] = accs[0].values[i].saturating_add(net.ft_weights[off + i]);
+                    }
+                }
+                if idx_b != usize::MAX {
+                    let off = idx_b * HALF_DIMENSIONS;
+                    for i in 0..HALF_DIMENSIONS {
+                        accs[1].values[i] = accs[1].values[i].saturating_add(net.ft_weights[off + i]);
+                    }
+                }
             }
         }
     }
-    
     accs
 }
 
@@ -443,9 +496,8 @@ fn crelu_i32(x: i32) -> u8 {
 
 /// Evaluate the current position using NNUE
 pub fn evaluate(board: &Board) -> i32 {
-    let net = match NETWORK.get() {
-        Some(n) => n,
-        None => return 0,
+    let net = unsafe {
+        get_network()
     };
 
     let (stm_acc, nstm_acc) = if board.side_to_move == Color::White {
@@ -612,28 +664,22 @@ unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumul
    unsafe { 
          // Process STM accumulator
         for i in (0..HALF_DIMENSIONS).step_by(16) {
-            let v = _mm256_loadu_si256(stm_acc.values.as_ptr().add(i) as *const __m256i);
-            let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
-            let packed = _mm256_packus_epi16(clamped, zero);  // Use packus for unsigned
-            let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
-            _mm_storeu_si128(
-                input.data.as_mut_ptr().add(i) as *mut __m128i,
-                _mm256_castsi256_si128(permuted)
-            );
-        }
+        let v = _mm256_load_si256(stm_acc.values.as_ptr().add(i) as *const __m256i);
+        let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
+        let packed = _mm256_packus_epi16(clamped, zero);
+        let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
+        _mm_store_si128(input.data.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(permuted));
+    }
 
     }
     unsafe {
     // Process NSTM accumulator  
         for i in (0..HALF_DIMENSIONS).step_by(16) {
-            let v = _mm256_loadu_si256(nstm_acc.values.as_ptr().add(i) as *const __m256i);
+            let v = _mm256_load_si256(nstm_acc.values.as_ptr().add(i) as *const __m256i);
             let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
             let packed = _mm256_packus_epi16(clamped, zero);
             let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
-            _mm_storeu_si128(
-                input.data.as_mut_ptr().add(HALF_DIMENSIONS + i) as *mut __m128i,
-                _mm256_castsi256_si128(permuted)
-            );
+            _mm_store_si128(input.data.as_mut_ptr().add(HALF_DIMENSIONS + i) as *mut __m128i, _mm256_castsi256_si128(permuted));
         }
     }
 
@@ -749,9 +795,9 @@ pub fn debug_eval(board: &Board) {
     let mut b_features = 0usize;
     
     for pt_idx in 0..5 {
-        let pt = PieceType::from(pt_idx);
+        let _pt = PieceType::from(pt_idx);
         for c in 0..2 {
-            let pc = if c == 0 { Color::White } else { Color::Black };
+            let _pc = if c == 0 { Color::White } else { Color::Black };
             let count = board.pieces[pt_idx][c].count_ones() as usize;
             w_features += count;
             b_features += count;

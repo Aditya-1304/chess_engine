@@ -17,7 +17,7 @@ use std::time::Instant;
 const INF: i32 = 32000;
 pub const MATE_SCORE: i32 = 31000;
 
-const NODE_UPDATE_INTERVAL: u64 = 4096;
+const NODE_UPDATE_INTERVAL: u64 = 16384;
 
 /// Thread-local search state for multi-threaded search
 pub struct SearchThread {

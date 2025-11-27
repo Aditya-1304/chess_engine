@@ -3,6 +3,9 @@ use crate::moves::Move;
 use crate::board::ZHash;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TTFlag {
   Exact,
@@ -116,6 +119,11 @@ impl TranspositionTable {
   pub fn probe(&self, key: ZHash) -> Option<(Move, i32, u8, TTFlag)> {
     let index = (key as usize) & (self.size - 1);
     let cluster = &self.table[index];
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        _mm_prefetch(cluster as *const _ as *const i8, _MM_HINT_T0);
+    }
 
     for i in 0..4 {
       if let Some((stored_key, mv, score, depth, _gen, flag_u8)) = cluster.entries[i].read() {

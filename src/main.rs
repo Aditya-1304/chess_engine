@@ -110,8 +110,10 @@ fn run_search(board: &mut Board, depth: u8) {
 
     // Get number of threads
     let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get().min(16))
+        .map(|n| (n.get() / 2).max(1))
         .unwrap_or(1);
+
+    // let num_threads = 1;
 
     println!("Using {} threads", num_threads);
 

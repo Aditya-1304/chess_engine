@@ -12,8 +12,9 @@ pub fn main_loop() {
 
     // Default to number of CPUs, capped at reasonable limit
     let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get().min(16))
+        .map(|n| (n.get() / 2).max(1))
         .unwrap_or(1);
+    // let num_threads = 1;
 
     let mut thread_pool = ThreadPool::new(num_threads, 128); // 128MB TT
     let mut book = OpeningBook::new("Perfect2023.bin");

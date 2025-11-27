@@ -131,7 +131,7 @@ pub fn is_square_attacked(board: &Board, sq: Square, attacker_color: Color) -> b
 
     // 4. Sliding Pieces
     let occ = board.occupancy[2];
-    let attackers = board.occupancy[attacker_color as usize];
+    let _attackers = board.occupancy[attacker_color as usize];
 
     // Bishops/Queens
     let bishop_like = board.pieces[PieceType::Bishop as usize][attacker_color as usize] 
@@ -223,7 +223,7 @@ fn generate_sliding_captures(board: &Board, list: &mut MoveList) {
 
 fn add_sliding_moves(
     from_sq: Square,
-    mut moves: Bitboard,
+    moves: Bitboard,
     their_pieces: Bitboard,
     list: &mut MoveList,
 ) {
@@ -500,7 +500,9 @@ unsafe fn init_magics(
     attack_fn: fn(Square, Bitboard) -> Bitboard,
 ) {
     // Launder pointer to reference locally for ease of use
-    let attack_buf = &mut *attack_buf_ptr;
+    let attack_buf = unsafe {
+      &mut *attack_buf_ptr
+    };
     let table_base = table_ptr;
 
     if attack_buf.capacity() == 0 { attack_buf.reserve(100_000); }
@@ -518,8 +520,11 @@ unsafe fn init_magics(
         for i in 0..size {
             let occ = occupancy_from_index(i, mask);
             let att = attack_fn(sq as Square, occ);
-            let magic_idx = ((occ.wrapping_mul(magics[sq])).wrapping_shr(shift)) as usize;
-            attack_buf[start_idx + magic_idx] = att;
+           let magic_idx = ((occ.wrapping_mul(magics[sq])).wrapping_shr(shift)) as usize;
+            // Use pointer offset to write to buffer to avoid bounds checks
+           unsafe {
+             *attack_buf.as_mut_ptr().add(start_idx + magic_idx) = att;
+           } 
         }
 
         // Write directly to pointer offset
@@ -529,7 +534,9 @@ unsafe fn init_magics(
             attacks_idx: start_idx,
             shift,
         };
-        *table_base.add(sq) = entry;
+        unsafe {
+          *table_base.add(sq) = entry;
+        }
     }
 }
 

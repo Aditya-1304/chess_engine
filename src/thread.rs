@@ -6,9 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+#[repr(C, align(64))]
 pub struct SharedState {
     pub tt: TranspositionTable,
     pub stop: AtomicBool,
+    pub _padding: [u8; 56],
     pub nodes: AtomicU64,
 }
 
@@ -17,6 +19,7 @@ impl SharedState {
         Self {
             tt: TranspositionTable::new(tt_size_mb),
             stop: AtomicBool::new(false),
+            _padding: [0; 56],
             nodes: AtomicU64::new(0),
         }
     }
@@ -37,7 +40,7 @@ impl ThreadPool {
 
     pub fn search(
         &self,
-        board: &mut Board,  // Changed: take mutable reference
+        board: &mut Board, 
         depth: u8,
         time_soft_limit: u128,
         time_hard_limit: u128,
