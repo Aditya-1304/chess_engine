@@ -9,6 +9,7 @@ pub enum Color {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C, align(64))]
 pub struct Accumulator {
   pub values: [i16; 256],
 }

@@ -337,10 +337,8 @@ impl SearchThread {
         beta: i32,
         do_null: bool,
     ) -> (i32, Option<Move>) {
-        if self.is_main || (self.nodes & 1023 == 0) {
-            if self.should_stop() {
-                return (0, None);
-            }
+        if self.nodes & 2047 == 0 && self.should_stop() {
+            return (0, None);
         }
             
 
@@ -383,14 +381,10 @@ impl SearchThread {
         }
 
         // Check Extension
+        let them = if board.side_to_move == Color::White { Color::Black } else { Color::White };
         let in_check = board.is_square_attacked(
-            board.pieces[PieceType::King as usize][board.side_to_move as usize].trailing_zeros()
-                as u8,
-            if board.side_to_move == Color::White {
-                Color::Black
-            } else {
-                Color::White
-            },
+            board.king_sq[board.side_to_move as usize],
+            them
         );
 
         if in_check {
@@ -444,6 +438,12 @@ impl SearchThread {
             }
         }
 
+        let static_eval = if !in_check {
+            eval::evaluate(board)
+        } else {
+            -INF
+        };
+
         // Null Move Pruning
         if do_null && !in_check && !is_root && depth >= 3 {
             let dominated_by_pawns = (board.pieces[PieceType::Knight as usize]
@@ -453,25 +453,22 @@ impl SearchThread {
                 | board.pieces[PieceType::Queen as usize][board.side_to_move as usize])
                 == 0;
 
-            if !dominated_by_pawns {
-                let static_eval = eval::evaluate(board);
-                if static_eval >= beta {
-                    let r = if depth > 6 { 3 } else { 2 };
-                    let old_ep = board.make_null_move();
-                    let (score, _) =
-                        self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
-                    board.unmake_null_move(old_ep);
-                    let null_score = -score;
-                    if null_score >= beta && null_score < 30000 {
-                        return (beta, None);
-                    }
+            
+            if !dominated_by_pawns && static_eval >= beta {
+                let r = if depth > 6 { 3 } else { 2 };
+                let old_ep = board.make_null_move();
+                let (score, _) =
+                    self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
+                board.unmake_null_move(old_ep);
+                let null_score = -score;
+                if null_score >= beta && null_score < 30000 {
+                    return (beta, None);
                 }
             }
         }
 
         // Reverse Futility Pruning
         if !is_root && !in_check && depth <= 6 {
-            let static_eval = eval::evaluate(board);
             let margin = 80 * (depth as i32);
             if static_eval - margin >= beta {
                 return (static_eval - margin, None);
@@ -532,9 +529,8 @@ impl SearchThread {
         // Futility Pruning Setup
         let mut futility_pruning = false;
         if !is_root && !in_check && depth <= 3 && alpha < beta - 1 {
-            let eval = eval::evaluate(board);
             let margin = 150 * (depth as i32);
-            if eval + margin <= alpha {
+            if static_eval + margin <= alpha {
                 futility_pruning = true;
             }
         }
@@ -607,12 +603,12 @@ impl SearchThread {
             } else {
                 Color::White
             };
-            let king_sq =
-                board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
-            if board.is_square_attacked(king_sq, board.side_to_move) {
+
+            if board.is_square_attacked(board.king_sq[us as usize], board.side_to_move) {
                 board.unmake_move(m, undo);
                 continue;
             }
+
             legal_moves += 1;
 
             let mut score;
@@ -772,11 +768,9 @@ impl SearchThread {
     }
 
     fn quiescence(&mut self, board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
-        if self.is_main || (self.nodes & 1023 == 0) {
-            if self.should_stop() {
-                return 0;
-            }
-        } 
+        if self.nodes & 2047 == 0 && self.should_stop() {
+            return 0;
+        }
         
         self.increment_nodes();
 
@@ -831,9 +825,8 @@ impl SearchThread {
             } else {
                 Color::White
             };
-            let king_sq =
-                board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
-            if board.is_square_attacked(king_sq, board.side_to_move) {
+
+            if board.is_square_attacked(board.king_sq[us as usize], board.side_to_move) {
                 board.unmake_move(m, undo);
                 continue;
             }

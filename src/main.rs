@@ -19,7 +19,9 @@ fn main() {
     match nnue::Network::load("nn-62ef826d1a6d.nnue") {
         Ok(net) => {
             nnue::NETWORK.set(net).ok();
+            nnue::init_cpu_features();
             println!("NNUE loaded successfully!");
+            println!("NNUE enabled: {}", nnue::is_enabled());  
         }
         Err(e) => {
             println!("Warning: Could not load NNUE: {}", e);
@@ -110,7 +112,7 @@ fn run_search(board: &mut Board, depth: u8) {
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get().min(16))
         .unwrap_or(1);
-    
+
     println!("Using {} threads", num_threads);
 
     let thread_pool = ThreadPool::new(num_threads, 128); // 128MB TT

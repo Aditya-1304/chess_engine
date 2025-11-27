@@ -1,9 +1,17 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::board::Board;
 use crate::types::{Accumulator, Color, PieceType, Square};
+
+static USE_AVX2: AtomicBool = AtomicBool::new(false);
+static CPU_FEATURES_CHECKED: AtomicBool = AtomicBool::new(false);
+static NNUE_ENABLED: AtomicBool = AtomicBool::new(false);
+static mut NETWORK_PTR: *const Network = std::ptr::null();
+static mut CACHED_USE_AVX2: bool = false;
+static mut CACHED_NNUE_ENABLED: bool = false;
 
 // HalfKP: 64 king squares * (64 squares * 10 piece types + 1) = 64 * 641 = 41024
 const INPUT_SIZE: usize = 41024;
@@ -114,6 +122,41 @@ impl Network {
     }
 }
 
+#[inline(always)]
+pub fn is_enabled() -> bool {
+    unsafe { CACHED_NNUE_ENABLED }
+}
+
+pub fn init_cpu_features() {
+    if let Some(net) = NETWORK.get() {
+        NNUE_ENABLED.store(true, Ordering::Relaxed);
+        unsafe {
+            NETWORK_PTR = net as *const Network;
+            CACHED_NNUE_ENABLED = true;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            USE_AVX2.store(true, Ordering::Relaxed);
+            unsafe { CACHED_USE_AVX2 = true }
+        }
+    }
+    CPU_FEATURES_CHECKED.store(true, Ordering::Relaxed);
+}
+
+#[inline(always)]
+unsafe fn get_network() -> &'static Network {
+    unsafe {
+        &*NETWORK_PTR
+    }
+}
+
+#[inline(always)]
+fn use_avx2() -> bool {
+    unsafe { CACHED_USE_AVX2 }
+}
+
 /// Get the piece-square index base for HalfKP
 #[inline]
 fn ps_index(pt: PieceType, color: Color) -> usize {
@@ -186,7 +229,7 @@ fn add_weights(acc: &mut Accumulator, index: usize, weights: &[i16]) {
     
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if use_avx2() {
             unsafe { add_weights_avx2(acc, &weights[offset..offset + HALF_DIMENSIONS]); }
             return;
         }
@@ -207,7 +250,7 @@ fn sub_weights(acc: &mut Accumulator, index: usize, weights: &[i16]) {
     
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if use_avx2() {
             unsafe { sub_weights_avx2(acc, &weights[offset..offset + HALF_DIMENSIONS]); }
             return;
         }
@@ -229,6 +272,75 @@ pub fn update_feature(acc: &mut Accumulator, index: usize, add: bool) {
         add_weights(acc, index, &net.ft_weights);
     } else {
         sub_weights(acc, index, &net.ft_weights);
+    }
+}
+
+/// Batch update features for better performance
+pub fn update_feature_batch(acc: &mut Accumulator, updates: &[(usize, bool)]) {
+    let net = unsafe { get_network() };
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if use_avx2() {
+            unsafe {
+                update_feature_batch_avx2(acc, updates, &net.ft_weights);
+            }
+            return;
+        }
+    }
+
+    for &(index, add) in updates {
+        if index == usize::MAX || index >= INPUT_SIZE {
+            continue;
+        }
+        let offset = index * HALF_DIMENSIONS;
+        if add {
+            for i in 0..HALF_DIMENSIONS {
+                acc.values[i] = acc.values[i].saturating_add(net.ft_weights[offset + i]);
+            }
+        } else {
+            for i in 0..HALF_DIMENSIONS {
+                acc.values[i] = acc.values[i].saturating_sub(net.ft_weights[offset + i]);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn update_feature_batch_avx2(
+    acc: &mut Accumulator,
+    updates: &[(usize, bool)],
+    weights: &[i16],
+) {
+    use std::arch::x86_64::*;
+
+    let acc_ptr = acc.values.as_mut_ptr();
+    let w_ptr = weights.as_ptr();
+
+    // Process 16 i16 values at a time (256 bits)
+    for i in (0..HALF_DIMENSIONS).step_by(16) {
+        let mut sum = unsafe {
+        _mm256_loadu_si256(acc_ptr.add(i) as *const __m256i)
+        };
+
+        for &(index, add) in updates {
+            if index == usize::MAX || index >= INPUT_SIZE {
+                continue;
+            }
+            let offset = index * HALF_DIMENSIONS;
+            let w = unsafe {
+                _mm256_loadu_si256(w_ptr.add(offset + i) as *const __m256i)
+            }; 
+
+            if add {
+                sum = _mm256_adds_epi16(sum, w);
+            } else {
+                sum = _mm256_subs_epi16(sum, w);
+            }
+        }
+
+       unsafe { _mm256_storeu_si256(acc_ptr.add(i) as *mut __m256i, sum); }
     }
 }
 
@@ -344,7 +456,7 @@ pub fn evaluate(board: &Board) -> i32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
+        if use_avx2() {
             return unsafe { evaluate_avx2(net, stm_acc, nstm_acc) };
         }
     }
@@ -392,92 +504,187 @@ fn evaluate_scalar(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumulator)
     (output / FV_SCALE).clamp(-30000, 30000)
 }
 
+// #[cfg(target_arch = "x86_64")]
+// #[target_feature(enable = "avx2")]
+// unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumulator) -> i32 {
+//     use std::arch::x86_64::*;
+    
+//     // Build clipped input vector (512 i8 values stored as u8)
+//     let mut input = [0i8; 512];
+    
+//     unsafe {
+//         let zero = _mm256_setzero_si256();
+//         let max_val = _mm256_set1_epi16(127);
+        
+//         // Process STM accumulator
+//         for i in (0..HALF_DIMENSIONS).step_by(16) {
+//             let v = _mm256_loadu_si256(stm_acc.values.as_ptr().add(i) as *const __m256i);
+//             let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
+//             // Pack to bytes
+//             let packed = _mm256_packs_epi16(clamped, zero);
+//             let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
+//             _mm_storeu_si128(
+//                 input.as_mut_ptr().add(i) as *mut __m128i,
+//                 _mm256_castsi256_si128(permuted)
+//             );
+//         }
+        
+//         // Process NSTM accumulator
+//         for i in (0..HALF_DIMENSIONS).step_by(16) {
+//             let v = _mm256_loadu_si256(nstm_acc.values.as_ptr().add(i) as *const __m256i);
+//             let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
+//             let packed = _mm256_packs_epi16(clamped, zero);
+//             let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
+//             _mm_storeu_si128(
+//                 input.as_mut_ptr().add(HALF_DIMENSIONS + i) as *mut __m128i,
+//                 _mm256_castsi256_si128(permuted)
+//             );
+//         }
+
+//         // Layer 1: 512 -> 32 using AVX2 dot products
+//         let mut l1_out = [0i32; L2_SIZE];
+        
+//         for i in 0..L2_SIZE {
+//             let mut sum = _mm256_setzero_si256();
+//             let weights_base = i * 512;
+            
+//             // Process 32 elements at a time
+//             for j in (0..512).step_by(32) {
+//                 let inp = _mm256_loadu_si256(input.as_ptr().add(j) as *const __m256i);
+//                 let wgt = _mm256_loadu_si256(net.l1_weights.as_ptr().add(weights_base + j) as *const __m256i);
+                
+//                 // Multiply and add horizontally
+//                 let product = _mm256_maddubs_epi16(inp, wgt);
+//                 let product_32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+//                 sum = _mm256_add_epi32(sum, product_32);
+//             }
+            
+//             // Horizontal sum
+//             let sum128 = _mm_add_epi32(
+//                 _mm256_castsi256_si128(sum),
+//                 _mm256_extracti128_si256(sum, 1)
+//             );
+//             let sum64 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+//             let sum32 = _mm_add_epi32(sum64, _mm_srli_si128(sum64, 4));
+            
+//             l1_out[i] = net.l1_biases[i] + _mm_cvtsi128_si32(sum32);
+//         }
+
+//         // Layer 2: 32 -> 32 (smaller, use scalar)
+//         let mut l2_out = [0i32; L3_SIZE];
+//         for i in 0..L3_SIZE {
+//             let mut sum = net.l2_biases[i];
+//             for j in 0..L2_SIZE {
+//                 let inp = (l1_out[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
+//                 sum += inp * (net.l2_weights[i * L2_SIZE + j] as i32);
+//             }
+//             l2_out[i] = sum;
+//         }
+
+//         // Layer 3: 32 -> 1
+//         let mut output = net.l3_bias;
+//         for j in 0..L3_SIZE {
+//             let inp = (l2_out[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
+//             output += inp * (net.l3_weights[j] as i32);
+//         }
+
+//         (output / FV_SCALE).clamp(-30000, 30000)
+//     }
+// }
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumulator) -> i32 {
     use std::arch::x86_64::*;
+
+    #[repr(C, align(64))]
+    struct AlignedInput {
+        data: [u8; 512]
+    }
     
-    // Build clipped input vector (512 i8 values stored as u8)
-    let mut input = [0i8; 512];
+    // Build clipped input vector (512 u8 values, all 0-127)
+    let mut input = AlignedInput {
+        data: [0u8; 512]
+    };
     
-    unsafe {
-        let zero = _mm256_setzero_si256();
-        let max_val = _mm256_set1_epi16(127);
-        
-        // Process STM accumulator
+    let zero = _mm256_setzero_si256();
+    let max_val = _mm256_set1_epi16(127);
+   unsafe { 
+         // Process STM accumulator
         for i in (0..HALF_DIMENSIONS).step_by(16) {
             let v = _mm256_loadu_si256(stm_acc.values.as_ptr().add(i) as *const __m256i);
             let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
-            // Pack to bytes
-            let packed = _mm256_packs_epi16(clamped, zero);
+            let packed = _mm256_packus_epi16(clamped, zero);  // Use packus for unsigned
             let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
             _mm_storeu_si128(
-                input.as_mut_ptr().add(i) as *mut __m128i,
-                _mm256_castsi256_si128(permuted)
-            );
-        }
-        
-        // Process NSTM accumulator
-        for i in (0..HALF_DIMENSIONS).step_by(16) {
-            let v = _mm256_loadu_si256(nstm_acc.values.as_ptr().add(i) as *const __m256i);
-            let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
-            let packed = _mm256_packs_epi16(clamped, zero);
-            let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
-            _mm_storeu_si128(
-                input.as_mut_ptr().add(HALF_DIMENSIONS + i) as *mut __m128i,
+                input.data.as_mut_ptr().add(i) as *mut __m128i,
                 _mm256_castsi256_si128(permuted)
             );
         }
 
-        // Layer 1: 512 -> 32 using AVX2 dot products
-        let mut l1_out = [0i32; L2_SIZE];
-        
-        for i in 0..L2_SIZE {
-            let mut sum = _mm256_setzero_si256();
-            let weights_base = i * 512;
-            
-            // Process 32 elements at a time
+    }
+    unsafe {
+    // Process NSTM accumulator  
+        for i in (0..HALF_DIMENSIONS).step_by(16) {
+            let v = _mm256_loadu_si256(nstm_acc.values.as_ptr().add(i) as *const __m256i);
+            let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
+            let packed = _mm256_packus_epi16(clamped, zero);
+            let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
+            _mm_storeu_si128(
+                input.data.as_mut_ptr().add(HALF_DIMENSIONS + i) as *mut __m128i,
+                _mm256_castsi256_si128(permuted)
+            );
+        }
+    }
+
+    // Layer 1: 512 -> 32
+    let mut l1_out = [0i32; L2_SIZE];
+    
+    for i in 0..L2_SIZE {
+        let mut sum = _mm256_setzero_si256();
+        let weights_base = i * 512;
+
+        unsafe {
             for j in (0..512).step_by(32) {
-                let inp = _mm256_loadu_si256(input.as_ptr().add(j) as *const __m256i);
+                // input is u8 (0-127), weights are i8
+                let inp = _mm256_loadu_si256(input.data.as_ptr().add(j) as *const __m256i);
                 let wgt = _mm256_loadu_si256(net.l1_weights.as_ptr().add(weights_base + j) as *const __m256i);
                 
-                // Multiply and add horizontally
+                // maddubs: treats first arg as unsigned, second as signed - perfect!
                 let product = _mm256_maddubs_epi16(inp, wgt);
                 let product_32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
                 sum = _mm256_add_epi32(sum, product_32);
             }
-            
-            // Horizontal sum
-            let sum128 = _mm_add_epi32(
-                _mm256_castsi256_si128(sum),
-                _mm256_extracti128_si256(sum, 1)
-            );
-            let sum64 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
-            let sum32 = _mm_add_epi32(sum64, _mm_srli_si128(sum64, 4));
-            
-            l1_out[i] = net.l1_biases[i] + _mm_cvtsi128_si32(sum32);
         }
-
-        // Layer 2: 32 -> 32 (smaller, use scalar)
-        let mut l2_out = [0i32; L3_SIZE];
-        for i in 0..L3_SIZE {
-            let mut sum = net.l2_biases[i];
-            for j in 0..L2_SIZE {
-                let inp = (l1_out[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
-                sum += inp * (net.l2_weights[i * L2_SIZE + j] as i32);
-            }
-            l2_out[i] = sum;
-        }
-
-        // Layer 3: 32 -> 1
-        let mut output = net.l3_bias;
-        for j in 0..L3_SIZE {
-            let inp = (l2_out[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
-            output += inp * (net.l3_weights[j] as i32);
-        }
-
-        (output / FV_SCALE).clamp(-30000, 30000)
+        
+        let sum128 = _mm_add_epi32(
+            _mm256_castsi256_si128(sum),
+            _mm256_extracti128_si256(sum, 1)
+        );
+        let sum64 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+        let sum32 = _mm_add_epi32(sum64, _mm_srli_si128(sum64, 4));
+        
+        l1_out[i] = net.l1_biases[i] + _mm_cvtsi128_si32(sum32);
     }
+
+    // L2 and L3 (small, keep scalar)
+    let mut l2_out = [0i32; L3_SIZE];
+    for i in 0..L3_SIZE {
+        let mut sum = net.l2_biases[i];
+        for j in 0..L2_SIZE {
+            let inp = (l1_out[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
+            sum += inp * (net.l2_weights[i * L2_SIZE + j] as i32);
+        }
+        l2_out[i] = sum;
+    }
+
+    let mut output = net.l3_bias;
+    for j in 0..L3_SIZE {
+        let inp = (l2_out[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
+        output += inp * (net.l3_weights[j] as i32);
+    }
+
+    (output / FV_SCALE).clamp(-30000, 30000)
 }
 
 pub fn add_piece(board: &mut Board, sq: Square, pt: PieceType, pc: Color) {

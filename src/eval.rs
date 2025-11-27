@@ -82,7 +82,7 @@ const KING_TABLE: [i32; 64] = [
 ];
 
 pub fn evaluate(board: &Board) -> i32 {
-  if nnue::NETWORK.get().is_some() {
+  if nnue::is_enabled() {
     return nnue::evaluate(board);
   }
 

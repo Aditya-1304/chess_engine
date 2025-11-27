@@ -1,3 +1,7 @@
 /target
-
+PLAN.md
 .agent
+perf.*
+movegen_prev.txt
+profile.json.*
+flame*

@@ -1,284 +1,327 @@
 use crate::{
- board::Board,
- moves::{self, MoveList},
- types::{Bitboard, Color, PieceType, Square}
+    board::Board,
+    moves::{self, MoveList},
+    types::{Bitboard, Color, PieceType, Square},
 };
-use std::sync::OnceLock;
+use std::ptr;
 
-#[derive(Clone, Copy)]
+// --- Types & Statics ---
+
+#[derive(Clone, Copy, Debug)]
 struct Magic {
-  mask: Bitboard,
-  magic: u64,
-  attacks: &'static [Bitboard],
-  shift: u32,
+    mask: Bitboard,
+    magic: u64,
+    attacks_idx: usize, // Offset into the global attack buffer
+    shift: u32,
 }
+
+const EMPTY_MAGIC: Magic = Magic {
+    mask: 0,
+    magic: 0,
+    attacks_idx: 0,
+    shift: 0,
+};
+
+// Global buffers using static mut (Ownership)
+static mut BISHOP_ATTACKS_BUF: Vec<Bitboard> = Vec::new();
+static mut ROOK_ATTACKS_BUF: Vec<Bitboard> = Vec::new();
+
+// Raw pointers for hot-path access (Performance)
+static mut BISHOP_ATTACKS_PTR: *const Bitboard = ptr::null();
+static mut ROOK_ATTACKS_PTR: *const Bitboard = ptr::null();
+
+static mut BISHOP_MAGICS: [Magic; 64] = [EMPTY_MAGIC; 64];
+static mut ROOK_MAGICS: [Magic; 64] = [EMPTY_MAGIC; 64];
 
 static PAWN_ATTACKS: [[Bitboard; 64]; 2] = precompute_pawn_attacks();
-static  KNIGHT_ATTACKS: [Bitboard; 64] = precompute_knight_attacks();
+static KNIGHT_ATTACKS: [Bitboard; 64] = precompute_knight_attacks();
 static KING_ATTACKS: [Bitboard; 64] = precompute_king_attacks();
-static BISHOP_MAGIC_TABLE: OnceLock<[Magic; 64]> = OnceLock::new();
-static ROOK_MAGIC_TABLE: OnceLock<[Magic; 64]> = OnceLock::new();
+
+// --- Initialization ---
 
 pub fn init() {
-    BISHOP_MAGIC_TABLE.get_or_init(init_bishop_magics);
-    ROOK_MAGIC_TABLE.get_or_init(init_rook_magics);
+    unsafe {
+        // Prevent double initialization
+        if !BISHOP_ATTACKS_PTR.is_null() { return; }
+
+        // Initialize Bishops
+        // Note: We use ptr::addr_of_mut! to avoid creating intermediate references
+        // which triggers the static_mut_refs lint in Rust 2024.
+        init_magics(
+            ptr::addr_of_mut!(BISHOP_MAGICS).cast(), 
+            ptr::addr_of_mut!(BISHOP_ATTACKS_BUF), 
+            &BISHOP_MAGIC_NUMBERS, 
+            bishop_mask, 
+            bishop_attacks_slow
+        );
+        // Get pointer from the Vec (laundering through raw pointer)
+        BISHOP_ATTACKS_PTR = (*ptr::addr_of!(BISHOP_ATTACKS_BUF)).as_ptr();
+
+        // Initialize Rooks
+        init_magics(
+            ptr::addr_of_mut!(ROOK_MAGICS).cast(), 
+            ptr::addr_of_mut!(ROOK_ATTACKS_BUF), 
+            &ROOK_MAGIC_NUMBERS, 
+            rook_mask, 
+            rook_attacks_slow
+        );
+        ROOK_ATTACKS_PTR = (*ptr::addr_of!(ROOK_ATTACKS_BUF)).as_ptr();
+    }
 }
 
-pub fn pawn_attacks(color: Color, sq: Square) -> Bitboard { 
-  PAWN_ATTACKS[color as usize][sq as usize] 
+// --- Hot Path Attack Lookups (Optimized) ---
+
+#[inline(always)]
+pub fn pawn_attacks(color: Color, sq: Square) -> Bitboard {
+    PAWN_ATTACKS[color as usize][sq as usize]
 }
 
-pub fn knight_attacks(sq: Square) -> Bitboard { 
-  KNIGHT_ATTACKS[sq as usize] 
+#[inline(always)]
+pub fn knight_attacks(sq: Square) -> Bitboard {
+    KNIGHT_ATTACKS[sq as usize]
 }
 
-pub fn king_attacks(sq: Square) -> Bitboard { 
-  KING_ATTACKS[sq as usize] 
+#[inline(always)]
+pub fn king_attacks(sq: Square) -> Bitboard {
+    KING_ATTACKS[sq as usize]
 }
 
+#[inline(always)]
 pub fn get_bishop_attacks(sq: Square, occupancy: Bitboard) -> Bitboard {
-  let magics = BISHOP_MAGIC_TABLE.get().unwrap();
-  let magic = &magics[sq as usize];
-  let index = ((occupancy & magic.mask).wrapping_mul(magic.magic)) >> magic.shift;
-  magic.attacks[index as usize]
+    unsafe {
+        // We use addr_of! and direct pointer arithmetic to avoid creating 
+        // a reference to the whole array or the static itself.
+        let magic_ptr = ptr::addr_of!(BISHOP_MAGICS).cast::<Magic>().add(sq as usize);
+        let m = &*magic_ptr; // Dereference just the single element
+        
+        let idx = ((occupancy & m.mask).wrapping_mul(m.magic)) >> m.shift;
+        *BISHOP_ATTACKS_PTR.add(m.attacks_idx + idx as usize)
+    }
 }
 
+#[inline(always)]
 pub fn get_rook_attacks(sq: Square, occupancy: Bitboard) -> Bitboard {
-  let magics = ROOK_MAGIC_TABLE.get().unwrap();
-  let magic = &magics[sq as usize];
-  let index = ((occupancy & magic.mask).wrapping_mul(magic.magic)) >> magic.shift;
-  magic.attacks[index as usize]
+    unsafe {
+        let magic_ptr = ptr::addr_of!(ROOK_MAGICS).cast::<Magic>().add(sq as usize);
+        let m = &*magic_ptr;
+        
+        let idx = ((occupancy & m.mask).wrapping_mul(m.magic)) >> m.shift;
+        *ROOK_ATTACKS_PTR.add(m.attacks_idx + idx as usize)
+    }
 }
 
-
+#[inline(always)]
 pub fn is_square_attacked(board: &Board, sq: Square, attacker_color: Color) -> bool {
-  let opponent_pieces = board.pieces;
+    let victim = if attacker_color == Color::White { Color::Black } else { Color::White };
+    
+    // 1. Pawns
+    if (pawn_attacks(victim, sq) & board.pieces[PieceType::Pawn as usize][attacker_color as usize]) != 0 {
+        return true;
+    }
 
-  let victim_color = if attacker_color == Color::White { Color::Black } else { Color::White };
-  let pawn_attacks = pawn_attacks(victim_color, sq);
-  if (pawn_attacks & board.pieces[PieceType::Pawn as usize][attacker_color as usize]) != 0 {
-    return true;
-  }
+    // 2. Knights
+    if (knight_attacks(sq) & board.pieces[PieceType::Knight as usize][attacker_color as usize]) != 0 {
+        return true;
+    }
 
-  let knight_attacks = knight_attacks(sq);
-  if (knight_attacks & board.pieces[PieceType::Knight as usize][attacker_color as usize]) != 0 {
-    return true;
-  }
+    // 3. Kings
+    if (king_attacks(sq) & board.pieces[PieceType::King as usize][attacker_color as usize]) != 0 {
+        return true;
+    }
 
-  let king_attacks = king_attacks(sq);
-  if (king_attacks & board.pieces[PieceType::King as usize][attacker_color as usize]) != 0 {
-    return true;
-  }
+    // 4. Sliding Pieces
+    let occ = board.occupancy[2];
+    let attackers = board.occupancy[attacker_color as usize];
 
-  let bishop_attacks = get_bishop_attacks(sq, board.occupancy[2]);
-  if (bishop_attacks
-      & (opponent_pieces[PieceType::Bishop as usize][attacker_color as usize]
-          | opponent_pieces[PieceType::Queen as usize][attacker_color as usize]))
-      != 0
-  {
-      return true;
-  }
+    // Bishops/Queens
+    let bishop_like = board.pieces[PieceType::Bishop as usize][attacker_color as usize] 
+                    | board.pieces[PieceType::Queen as usize][attacker_color as usize];
+    
+    if bishop_like != 0 {
+        if (get_bishop_attacks(sq, occ) & bishop_like) != 0 {
+            return true;
+        }
+    }
 
-  let rook_attacks = get_rook_attacks(sq, board.occupancy[2]);
-  if (rook_attacks
-      & (opponent_pieces[PieceType::Rook as usize][attacker_color as usize]
-          | opponent_pieces[PieceType::Queen as usize][attacker_color as usize]))
-      != 0
-  {
-      return true;
-  }
+    // Rooks/Queens
+    let rook_like = board.pieces[PieceType::Rook as usize][attacker_color as usize] 
+                  | board.pieces[PieceType::Queen as usize][attacker_color as usize];
+    
+    if rook_like != 0 {
+        if (get_rook_attacks(sq, occ) & rook_like) != 0 {
+            return true;
+        }
+    }
 
-  false
+    false
 }
+
+// --- Move Generation ---
 
 pub fn generate_pseudo_legal_moves(board: &Board, list: &mut MoveList) {
-  generate_pawn_moves(board, list);
-  generate_knight_moves(board, list);
-  generate_king_moves(board, list);
-  generate_sliding_moves(board, list);
+    generate_pawn_moves(board, list);
+    generate_knight_moves(board, list);
+    generate_king_moves(board, list);
+    generate_sliding_moves(board, list);
+}
+
+pub fn generate_captures(board: &Board, list: &mut MoveList) {
+    generate_pawn_captures(board, list);
+    generate_knight_captures(board, list);
+    generate_king_captures(board, list);
+    generate_sliding_captures(board, list);
 }
 
 fn generate_sliding_moves(board: &Board, list: &mut MoveList) {
-  let us = board.side_to_move;
-  let our_pieces = board.occupancy[us as usize];
-  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
-  let all_pieces = our_pieces | their_pieces;
+    let us = board.side_to_move;
+    let occ = board.occupancy[2];
+    let our_pieces = board.occupancy[us as usize];
+    let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
 
-  let mut bishops = board.pieces[PieceType::Bishop as usize][us as usize]
-    | board.pieces[PieceType::Queen as usize][us as usize];
-  while bishops != 0 {
-    let from_sq = bishops.trailing_zeros() as Square;
-    let attacks = get_bishop_attacks(from_sq, all_pieces) & !our_pieces;
-    add_sliding_moves(from_sq, attacks, their_pieces, list);
-    bishops &= bishops - 1;
-  }
+    let mut bishops = board.pieces[PieceType::Bishop as usize][us as usize]
+        | board.pieces[PieceType::Queen as usize][us as usize];
+    while bishops != 0 {
+        let from_sq = bishops.trailing_zeros() as Square;
+        let attacks = get_bishop_attacks(from_sq, occ) & !our_pieces;
+        add_sliding_moves(from_sq, attacks, their_pieces, list);
+        bishops &= bishops - 1;
+    }
 
-  let mut rooks = board.pieces[PieceType::Rook as usize][us as usize]
-    | board.pieces[PieceType::Queen as usize][us as usize];
-  while rooks != 0 {
-    let from_sq = rooks.trailing_zeros() as Square;
-    let attacks = get_rook_attacks(from_sq, all_pieces) & !our_pieces;
-    add_sliding_moves(from_sq, attacks, their_pieces, list);
-    rooks &= rooks - 1;
-  }
+    let mut rooks = board.pieces[PieceType::Rook as usize][us as usize]
+        | board.pieces[PieceType::Queen as usize][us as usize];
+    while rooks != 0 {
+        let from_sq = rooks.trailing_zeros() as Square;
+        let attacks = get_rook_attacks(from_sq, occ) & !our_pieces;
+        add_sliding_moves(from_sq, attacks, their_pieces, list);
+        rooks &= rooks - 1;
+    }
+}
+
+fn generate_sliding_captures(board: &Board, list: &mut MoveList) {
+    let us = board.side_to_move;
+    let occ = board.occupancy[2];
+    let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
+
+    let mut bishops = board.pieces[PieceType::Bishop as usize][us as usize]
+        | board.pieces[PieceType::Queen as usize][us as usize];
+    while bishops != 0 {
+        let from_sq = bishops.trailing_zeros() as Square;
+        let attacks = get_bishop_attacks(from_sq, occ) & their_pieces;
+        add_sliding_captures(from_sq, attacks, list);
+        bishops &= bishops - 1;
+    }
+
+    let mut rooks = board.pieces[PieceType::Rook as usize][us as usize]
+        | board.pieces[PieceType::Queen as usize][us as usize];
+    while rooks != 0 {
+        let from_sq = rooks.trailing_zeros() as Square;
+        let attacks = get_rook_attacks(from_sq, occ) & their_pieces;
+        add_sliding_captures(from_sq, attacks, list);
+        rooks &= rooks - 1;
+    }
 }
 
 fn add_sliding_moves(
-  from_sq: Square,
-  attacks: Bitboard,
-  their_pieces: Bitboard,
-  list: &mut MoveList,
+    from_sq: Square,
+    mut moves: Bitboard,
+    their_pieces: Bitboard,
+    list: &mut MoveList,
 ) {
-  let mut captures = attacks & their_pieces;
-  while captures != 0{
-    let to_sq = captures.trailing_zeros() as Square;
-    list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
-    captures &= captures - 1;
-  }
-  let mut quiet_moves = attacks & !their_pieces;
-  while quiet_moves != 0 {
-    let to_sq = quiet_moves.trailing_zeros() as Square;
-    list.push(moves::new(from_sq, to_sq, moves::QUIET_MOVE_FLAG));
-    quiet_moves &= quiet_moves - 1;
-  }
-}
-
-const fn precompute_pawn_attacks() -> [[Bitboard; 64]; 2] {
-  let mut attacks = [[0; 64]; 2];
-  let mut sq = 0;
-  while sq < 64 {
-    let mut bb = 0;
-    if (sq / 8) < 7 {
-      if (sq % 8) > 0 {
-        bb |= 1 << (sq + 7); 
-      }
-      if (sq % 8) < 7 {
-        bb |= 1 << (sq + 9);
-      }
+    let mut captures = moves & their_pieces;
+    while captures != 0 {
+        let to_sq = captures.trailing_zeros() as Square;
+        list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+        captures &= captures - 1;
     }
-    attacks[Color::White as usize][sq] = bb;
-
-    bb = 0;
-    if (sq / 8) > 0 {
-      if (sq % 8) > 0 {
-        bb |= 1 << (sq - 9);
-      }
-      if (sq % 8) < 7 {
-        bb |= 1 << (sq - 7);
-      }
+    
+    let mut quiets = moves & !their_pieces;
+    while quiets != 0 {
+        let to_sq = quiets.trailing_zeros() as Square;
+        list.push(moves::new(from_sq, to_sq, moves::QUIET_MOVE_FLAG));
+        quiets &= quiets - 1;
     }
-    attacks[Color::Black as usize][sq] = bb;
-    sq += 1;
-  }
-  attacks
 }
 
-const fn precompute_knight_attacks() -> [Bitboard; 64] {
-  let mut attacks = [0; 64];
-  let mut sq = 0;
-  while sq < 64 {
-    let mut bb = 0;
-    let rank = sq / 8;
-    let file = sq % 8;
-
-    if rank < 6 && file < 7 { bb |= 1 << (sq + 17); } // 2 up, 1 right
-    if rank < 6 && file > 0 { bb |= 1 << (sq + 15); } // 2 up, 1 left
-    if rank < 7 && file < 6 { bb |= 1 << (sq + 10); } // 1 up, 2 right
-    if rank < 7 && file > 1 { bb |= 1 << (sq + 6); } // 1 up, 2 left
-    if rank > 1 && file < 7 { bb |= 1 << (sq - 15); } // 2 down, 1 right
-    if rank > 1 && file > 0 { bb |= 1 << (sq - 17); } // 2 down, 1 left
-    if rank > 0 && file < 6 { bb |= 1 << (sq - 6); } // 1 down , 2 right
-    if rank > 0 && file > 1 { bb |= 1 << (sq - 10); } // 1 down, 1 left
-
-    attacks[sq] = bb;
-    sq += 1;
-  }
-  attacks
+fn add_sliding_captures(from_sq: Square, mut captures: Bitboard, list: &mut MoveList) {
+    while captures != 0 {
+        let to_sq = captures.trailing_zeros() as Square;
+        list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+        captures &= captures - 1;
+    }
 }
 
-const fn precompute_king_attacks() -> [Bitboard; 64] {
-  let mut attacks = [0; 64];
-  let mut sq = 0;
-  while sq < 64 {
-    let mut bb = 0;
-    let rank = sq / 8;
-    let file = sq % 8;
-
-    if rank < 7 { bb |= 1 << (sq + 8); } // up
-    if rank > 0 { bb |= 1 << (sq - 8); } // down
-    if file < 7 { bb |= 1 << (sq + 1); } // right
-    if file > 0 { bb |= 1 << (sq - 1); } // left
-    if rank < 7 && file < 7 { bb |= 1 << (sq + 9); } // up-right
-    if rank < 7 && file > 0 { bb |= 1 << (sq + 7); } // up-left
-    if rank > 0 && file < 7 { bb |= 1 << (sq - 7); } // down-right
-    if rank > 0 && file > 0 { bb |= 1 << (sq - 9); } // down-left
-
-    attacks[sq] = bb;
-    sq += 1;
-  }
-  attacks
-}
-
-fn generate_king_moves(board: &Board, list: &mut MoveList) {
+fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
   let us = board.side_to_move;
   let them = if us == Color::White { Color::Black } else { Color::White };
-  let our_pieces = board.occupancy[us as usize];
+  let our_pawns = board.pieces[PieceType::Pawn as usize][us as usize];
+  let their_pieces = board.occupancy[them as usize];
   let all_pieces = board.occupancy[2];
 
-  let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
-
-  // Normal king moves
-  let mut attacks = KING_ATTACKS[king_sq as usize] & !our_pieces;
-  while attacks != 0 {
-    let to_sq = attacks.trailing_zeros() as Square;
-    let flag = if (1 << to_sq) & board.occupancy[them as usize] != 0 {
-      moves::CAPTURE_FLAG
-    } else {
-      moves::QUIET_MOVE_FLAG
-    };
-    list.push(moves::new(king_sq, to_sq, flag));
-    attacks &= attacks - 1;
-  }
-
-  // Castling - can't castle from check
-  if is_square_attacked(board, king_sq, them) {
-    return;
-  }
-
-  if us == Color::White {
-    // Kingside: squares f1(5) and g1(6) must be empty and not attacked
-    if (board.castling_rights & 0b0001) != 0 
-       && (all_pieces & 0x60) == 0  // f1 and g1 empty
-       && !is_square_attacked(board,5, them)  // f1 not attacked
-       && !is_square_attacked(board,6, them)  // g1 not attacked
-    {
-        list.push(moves::new(4, 6, moves::KING_CASTLE_FLAG));
-    }
-    // Queenside: squares d1(3), c1(2), b1(1) - only d1,c1 need attack check
-    if (board.castling_rights & 0b0010) != 0 
-       && (all_pieces & 0xE) == 0  // d1, c1, b1 empty
-       && !is_square_attacked(board, 3, them)  // d1 not attacked
-       && !is_square_attacked(board, 2, them)  // c1 not attacked
-    {
-        list.push(moves::new(4, 2, moves::QUEEN_CASTLE_FLAG));
-    }
+  let (up, rank_start, rank_promo) = if us == Color::White {
+    (8i8, 0xFF00u64, 0xFF000000000000u64)
   } else {
-    // Black kingside
-    if (board.castling_rights & 0b0100) != 0 
-       && (all_pieces & 0x6000000000000000) == 0
-       && !is_square_attacked(board, 61, them) 
-       && !is_square_attacked(board, 62, them)
-    {
-        list.push(moves::new(60, 62, moves::KING_CASTLE_FLAG));
+    (-8i8, 0xFF000000000000u64, 0xFF00u64)
+  };
+
+  let mut pawns = our_pawns;
+  while pawns != 0 {
+    let from_sq = pawns.trailing_zeros() as Square;
+    let from_bb = 1 << from_sq;
+
+    // Single push
+    let to_sq_i8 = from_sq as i8 + up;
+    if to_sq_i8 >= 0 && to_sq_i8 < 64 {
+      let to_sq = to_sq_i8 as Square;
+      if (1 << to_sq) & all_pieces == 0 {
+        if (from_bb & rank_promo) != 0 {
+          list.push(moves::new(from_sq, to_sq, moves::QUEEN_PROMOTION_FLAG));
+          list.push(moves::new(from_sq, to_sq, moves::ROOK_PROMOTION_FLAG));
+          list.push(moves::new(from_sq, to_sq, moves::BISHOP_PROMOTION_FLAG));
+          list.push(moves::new(from_sq, to_sq, moves::KNIGHT_PROMOTION_FLAG));
+        } else {
+          list.push(moves::new(from_sq, to_sq, moves::QUIET_MOVE_FLAG));
+        }
+
+        // Double push
+        if (from_bb & rank_start) != 0 {
+          let to_sq_double_i8 = from_sq as i8 + 2 * up;
+          if to_sq_double_i8 >= 0 && to_sq_double_i8 < 64 {
+            let to_sq_double = to_sq_double_i8 as Square;
+            if (1 << to_sq_double) & all_pieces == 0 {
+              list.push(moves::new(
+                from_sq,
+                to_sq_double,
+                moves::DOUBLE_PAWN_PUSH_FLAG,
+              ));
+            }
+          }
+        }
+      }
     }
-    // Black queenside
-    if (board.castling_rights & 0b1000) != 0 
-       && (all_pieces & 0xE00000000000000) == 0
-       && !is_square_attacked(board, 59, them) 
-       && !is_square_attacked(board, 58, them)
-    {
-        list.push(moves::new(60, 58, moves::QUEEN_CASTLE_FLAG));
+
+    // Captures
+    let mut attacks = PAWN_ATTACKS[us as usize][from_sq as usize] & their_pieces;
+    while attacks != 0 {
+      let to_sq = attacks.trailing_zeros() as Square;
+      if (from_bb & rank_promo) != 0 {
+        list.push(moves::new(from_sq, to_sq, moves::QUEEN_PROMOTION_CAPTURE_FLAG));
+        list.push(moves::new(from_sq, to_sq, moves::ROOK_PROMOTION_CAPTURE_FLAG));
+        list.push(moves::new(from_sq, to_sq, moves::BISHOP_PROMOTION_CAPTURE_FLAG));
+        list.push(moves::new(from_sq, to_sq, moves::KNIGHT_PROMOTION_CAPTURE_FLAG));
+      } else {
+        list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+      }
+      attacks &= attacks - 1;
     }
+
+    // En passant
+    if let Some(ep_sq) = board.en_passant {
+      if PAWN_ATTACKS[us as usize][from_sq as usize] & (1 << ep_sq) != 0 {
+        list.push(moves::new(from_sq, ep_sq, moves::EN_PASSANT_CAPTURE_FLAG));
+      }
+    }
+
+    pawns &= pawns - 1;
   }
 }
 
@@ -309,17 +352,80 @@ fn generate_knight_moves(board: &Board, list: &mut MoveList) {
     knights &= knights - 1;
   }
 }
-fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
+
+fn generate_king_moves(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let them = if us == Color::White { Color::Black } else { Color::White };
+  let our_pieces = board.occupancy[us as usize];
+  let all_pieces = board.occupancy[2];
+
+  let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
+
+  // Normal king moves
+  let mut attacks = KING_ATTACKS[king_sq as usize] & !our_pieces;
+  while attacks != 0 {
+    let to_sq = attacks.trailing_zeros() as Square;
+    let flag = if (1 << to_sq) & board.occupancy[them as usize] != 0 {
+      moves::CAPTURE_FLAG
+    } else {
+      moves::QUIET_MOVE_FLAG
+    };
+    list.push(moves::new(king_sq, to_sq, flag));
+    attacks &= attacks - 1;
+  }
+
+  // Castling
+  if is_square_attacked(board, king_sq, them) {
+    return;
+  }
+
+  if us == Color::White {
+    // Kingside
+    if (board.castling_rights & 0b0001) != 0 
+       && (all_pieces & 0x60) == 0  // f1 g1
+       && !is_square_attacked(board,5, them)  
+       && !is_square_attacked(board,6, them)  
+    {
+        list.push(moves::new(4, 6, moves::KING_CASTLE_FLAG));
+    }
+    // Queenside
+    if (board.castling_rights & 0b0010) != 0 
+       && (all_pieces & 0xE) == 0  // d1 c1 b1
+       && !is_square_attacked(board, 3, them)  
+       && !is_square_attacked(board, 2, them)  
+    {
+        list.push(moves::new(4, 2, moves::QUEEN_CASTLE_FLAG));
+    }
+  } else {
+    // Black kingside
+    if (board.castling_rights & 0b0100) != 0 
+       && (all_pieces & 0x6000000000000000) == 0
+       && !is_square_attacked(board, 61, them) 
+       && !is_square_attacked(board, 62, them)
+    {
+        list.push(moves::new(60, 62, moves::KING_CASTLE_FLAG));
+    }
+    // Black queenside
+    if (board.castling_rights & 0b1000) != 0 
+       && (all_pieces & 0xE00000000000000) == 0
+       && !is_square_attacked(board, 59, them) 
+       && !is_square_attacked(board, 58, them)
+    {
+        list.push(moves::new(60, 58, moves::QUEEN_CASTLE_FLAG));
+    }
+  }
+}
+
+fn generate_pawn_captures(board: &Board, list: &mut MoveList) {
   let us = board.side_to_move;
   let them = if us == Color::White { Color::Black } else { Color::White };
   let our_pawns = board.pieces[PieceType::Pawn as usize][us as usize];
   let their_pieces = board.occupancy[them as usize];
-  let all_pieces = board.occupancy[2];
 
-  let (up, rank_3, rank_7) = if us == Color::White {
-    (8i8, 0xFF00u64, 0xFF000000000000u64) // White: Rank 2, Rank 7
+  let rank_promo = if us == Color::White {
+     0xFF000000000000u64
   } else {
-    (-8i8, 0xFF000000000000u64, 0xFF00u64) // Black: Rank 7, Rank 2
+    0xFF00u64
   };
 
   let mut pawns = our_pawns;
@@ -327,42 +433,10 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
     let from_sq = pawns.trailing_zeros() as Square;
     let from_bb = 1 << from_sq;
 
-    // Single push
-    let to_sq_i8 = from_sq as i8 + up;
-    if to_sq_i8 >= 0 && to_sq_i8 < 64 {
-      let to_sq = to_sq_i8 as Square;
-      if (1 << to_sq) & all_pieces == 0 {
-        if (from_bb & rank_7) != 0 {
-          list.push(moves::new(from_sq, to_sq, moves::QUEEN_PROMOTION_FLAG));
-          list.push(moves::new(from_sq, to_sq, moves::ROOK_PROMOTION_FLAG));
-          list.push(moves::new(from_sq, to_sq, moves::BISHOP_PROMOTION_FLAG));
-          list.push(moves::new(from_sq, to_sq, moves::KNIGHT_PROMOTION_FLAG));
-        } else {
-          list.push(moves::new(from_sq, to_sq, moves::QUIET_MOVE_FLAG));
-        }
-
-        // Double push
-        if (from_bb & rank_3) != 0 {
-          let to_sq_double_i8 = from_sq as i8 + 2 * up;
-          if to_sq_double_i8 >= 0 && to_sq_double_i8 < 64 {
-            let to_sq_double = to_sq_double_i8 as Square;
-            if (1 << to_sq_double) & all_pieces == 0 {
-              list.push(moves::new(
-                from_sq,
-                to_sq_double,
-                moves::DOUBLE_PAWN_PUSH_FLAG,
-              ));
-            }
-          }
-        }
-      }
-    }
-
-    // Captures
     let mut attacks = PAWN_ATTACKS[us as usize][from_sq as usize] & their_pieces;
     while attacks != 0 {
       let to_sq = attacks.trailing_zeros() as Square;
-      if (from_bb & rank_7) != 0 {
+      if (from_bb & rank_promo) !=0 {
         list.push(moves::new(from_sq, to_sq, moves::QUEEN_PROMOTION_CAPTURE_FLAG));
         list.push(moves::new(from_sq, to_sq, moves::ROOK_PROMOTION_CAPTURE_FLAG));
         list.push(moves::new(from_sq, to_sq, moves::BISHOP_PROMOTION_CAPTURE_FLAG));
@@ -373,7 +447,6 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
       attacks &= attacks - 1;
     }
 
-    // En passant
     if let Some(ep_sq) = board.en_passant {
       if PAWN_ATTACKS[us as usize][from_sq as usize] & (1 << ep_sq) != 0 {
         list.push(moves::new(from_sq, ep_sq, moves::EN_PASSANT_CAPTURE_FLAG));
@@ -384,101 +457,83 @@ fn generate_pawn_moves(board: &Board, list: &mut MoveList) {
   }
 }
 
+fn generate_knight_captures(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
+  let mut knights = board.pieces[PieceType::Knight as usize][us as usize];
 
-fn init_bishop_magics() -> [Magic; 64] {
-    let mut bishop_attacks = Vec::new();
-    let mut attacks_info = Vec::new();
-
-    for sq in 0..64 {
-        let mask = bishop_mask(sq);
-        let relevant_bits = mask.count_ones();
-        let shift = 64 - relevant_bits;
-        
-        let magic = BISHOP_MAGICS[sq as usize];
-
-        let table_size = 1 << relevant_bits;
-        let start_index = bishop_attacks.len();
-        attacks_info.push((start_index, table_size));
-        
-        bishop_attacks.resize(start_index + table_size, 0);
-
-        for i in 0..table_size {
-            let occupancy = occupancy_from_index(i, mask);
-            let attack = bishop_attacks_slow(sq, occupancy);
-            let magic_index = ((occupancy.wrapping_mul(magic)) >> shift) as usize;
-            bishop_attacks[start_index + magic_index] = attack;
-        }
+  while knights != 0 {
+    let from_sq = knights.trailing_zeros() as Square;
+    let attacks = KNIGHT_ATTACKS[from_sq as usize];
+    let mut captures = attacks & their_pieces;
+    
+    while captures != 0 {
+      let to_sq = captures.trailing_zeros() as Square;
+      list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
+      captures &= captures - 1;
     }
-
-    let static_attacks = Box::leak(bishop_attacks.into_boxed_slice());
-
-    let mut magics = [Magic {
-        mask: 0,
-        magic: 0,
-        attacks: &[],
-        shift: 0,
-    }; 64];
-    for sq in 0..64 {
-        let mask = bishop_mask(sq);
-        let relevant_bits = mask.count_ones();
-        let (start, len) = attacks_info[sq as usize];
-        magics[sq as usize] = Magic {
-            mask,
-            magic: BISHOP_MAGICS[sq as usize],
-            attacks: &static_attacks[start..start + len],
-            shift: 64 - relevant_bits,
-        };
-    }
-    magics
+    knights &= knights - 1;
+  }
 }
 
-fn init_rook_magics() -> [Magic; 64] {
-    let mut rook_attacks = Vec::new();
-    let mut attacks_info = Vec::new();
+fn generate_king_captures(board: &Board, list: &mut MoveList) {
+  let us = board.side_to_move;
+  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
+  let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
 
-    for sq in 0..64 {
-        let mask = rook_mask(sq);
-        let relevant_bits = mask.count_ones();
-        let shift = 64 - relevant_bits;
-        
-        let magic = ROOK_MAGICS[sq as usize];
-
-        let table_size = 1 << relevant_bits;
-        let start_index = rook_attacks.len();
-        attacks_info.push((start_index, table_size));
-
-        rook_attacks.resize(start_index + table_size, 0);
-
-        for i in 0..table_size {
-            let occupancy = occupancy_from_index(i, mask);
-            let attack = rook_attacks_slow(sq, occupancy);
-            let magic_index = ((occupancy.wrapping_mul(magic)) >> shift) as usize;
-            rook_attacks[start_index + magic_index] = attack;
-        }
-    }
-
-    let static_attacks = Box::leak(rook_attacks.into_boxed_slice());
-
-    let mut magics = [Magic {
-        mask: 0,
-        magic: 0,
-        attacks: &[],
-        shift: 0,
-    }; 64];
-    for sq in 0..64 {
-        let mask = rook_mask(sq);
-        let relevant_bits = mask.count_ones();
-        let (start, len) = attacks_info[sq as usize];
-        magics[sq as usize] = Magic {
-            mask,
-            magic: ROOK_MAGICS[sq as usize],
-            attacks: &static_attacks[start..start + len],
-            shift: 64 - relevant_bits,
-        };
-    }
-    magics
+  let mut attacks = KING_ATTACKS[king_sq as usize] & their_pieces;
+  while attacks != 0 {
+    let to_sq = attacks.trailing_zeros() as Square;
+    list.push(moves::new(king_sq, to_sq, moves::CAPTURE_FLAG));
+    attacks &= attacks - 1;
+  }
 }
 
+// --- Initialization Helpers ---
+
+// NOTE: We take *mut pointers to avoid creating references to static muts
+unsafe fn init_magics(
+    table_ptr: *mut Magic,
+    attack_buf_ptr: *mut Vec<Bitboard>,
+    magics: &[u64; 64],
+    mask_fn: fn(Square) -> Bitboard,
+    attack_fn: fn(Square, Bitboard) -> Bitboard,
+) {
+    // Launder pointer to reference locally for ease of use
+    let attack_buf = &mut *attack_buf_ptr;
+    let table_base = table_ptr;
+
+    if attack_buf.capacity() == 0 { attack_buf.reserve(100_000); }
+
+    for sq in 0..64 {
+        let mask = mask_fn(sq as Square);
+        let bits = mask.count_ones();
+        let size = 1 << bits;
+        let shift = 64 - bits;
+        
+        let start_idx = attack_buf.len();
+        
+        for _ in 0..size { attack_buf.push(0); }
+        
+        for i in 0..size {
+            let occ = occupancy_from_index(i, mask);
+            let att = attack_fn(sq as Square, occ);
+            let magic_idx = ((occ.wrapping_mul(magics[sq])).wrapping_shr(shift)) as usize;
+            attack_buf[start_idx + magic_idx] = att;
+        }
+
+        // Write directly to pointer offset
+        let entry = Magic {
+            mask,
+            magic: magics[sq],
+            attacks_idx: start_idx,
+            shift,
+        };
+        *table_base.add(sq) = entry;
+    }
+}
+
+// --- Mask & Slow Attack Generators ---
 
 fn occupancy_from_index(index: usize, mut mask: Bitboard) -> Bitboard {
   let mut occupancy = 0;
@@ -496,11 +551,9 @@ fn bishop_mask(sq: Square) -> Bitboard {
     let mut result = 0;
     let r = (sq / 8) as i8;
     let f = (sq % 8) as i8;
-
     for (dr, df) in &[(-1, -1), (-1, 1), (1, -1), (1, 1)] {
         let mut nr = r + dr;
         let mut nf = f + df;
-        // Edges are not part of the occupancy mask for magics
         while nr > 0 && nr < 7 && nf > 0 && nf < 7 {
             result |= 1 << (nr * 8 + nf);
             nr += dr;
@@ -514,23 +567,10 @@ fn rook_mask(sq: Square) -> Bitboard {
     let mut result = 0;
     let r = (sq / 8) as i8;
     let f = (sq % 8) as i8;
-
-    // North
-    for nr in (r + 1)..7 {
-        result |= 1 << (nr * 8 + f);
-    }
-    // South
-    for nr in 1..r {
-        result |= 1 << (nr * 8 + f);
-    }
-    // East
-    for nf in (f + 1)..7 {
-        result |= 1 << (r * 8 + nf);
-    }
-    // West
-    for nf in 1..f {
-        result |= 1 << (r * 8 + nf);
-    }
+    for nr in (r + 1)..7 { result |= 1 << (nr * 8 + f); }
+    for nr in 1..r { result |= 1 << (nr * 8 + f); }
+    for nf in (f + 1)..7 { result |= 1 << (r * 8 + nf); }
+    for nf in 1..f { result |= 1 << (r * 8 + nf); }
     result
 }
 
@@ -538,16 +578,13 @@ fn bishop_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
     let mut attacks = 0;
     let r = (sq / 8) as i8;
     let f = (sq % 8) as i8;
-
     for (dr, df) in &[(-1, -1), (-1, 1), (1, -1), (1, 1)] {
         let mut nr = r + dr;
         let mut nf = f + df;
         while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
             let bit = 1 << (nr * 8 + nf);
             attacks |= bit;
-            if (occupancy & bit) != 0 {
-                break;
-            }
+            if (occupancy & bit) != 0 { break; }
             nr += dr;
             nf += df;
         }
@@ -559,16 +596,13 @@ fn rook_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
     let mut attacks = 0;
     let r = (sq / 8) as i8;
     let f = (sq % 8) as i8;
-
     for (dr, df) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
         let mut nr = r + dr;
         let mut nf = f + df;
         while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
             let bit = 1 << (nr * 8 + nf);
             attacks |= bit;
-            if (occupancy & bit) != 0 {
-                break;
-            }
+            if (occupancy & bit) != 0 { break; }
             nr += dr;
             nf += df;
         }
@@ -576,7 +610,74 @@ fn rook_attacks_slow(sq: Square, occupancy: Bitboard) -> Bitboard {
     attacks
 }
 
-static BISHOP_MAGICS: [u64; 64] = [
+// --- Precomputed Tables ---
+
+const fn precompute_pawn_attacks() -> [[Bitboard; 64]; 2] {
+  let mut attacks = [[0; 64]; 2];
+  let mut sq = 0;
+  while sq < 64 {
+    let mut bb = 0;
+    if (sq / 8) < 7 {
+      if (sq % 8) > 0 { bb |= 1 << (sq + 7); }
+      if (sq % 8) < 7 { bb |= 1 << (sq + 9); }
+    }
+    attacks[Color::White as usize][sq] = bb;
+    bb = 0;
+    if (sq / 8) > 0 {
+      if (sq % 8) > 0 { bb |= 1 << (sq - 9); }
+      if (sq % 8) < 7 { bb |= 1 << (sq - 7); }
+    }
+    attacks[Color::Black as usize][sq] = bb;
+    sq += 1;
+  }
+  attacks
+}
+
+const fn precompute_knight_attacks() -> [Bitboard; 64] {
+  let mut attacks = [0; 64];
+  let mut sq = 0;
+  while sq < 64 {
+    let mut bb = 0;
+    let r = sq / 8;
+    let f = sq % 8;
+    if r < 6 && f < 7 { bb |= 1 << (sq + 17); }
+    if r < 6 && f > 0 { bb |= 1 << (sq + 15); }
+    if r < 7 && f < 6 { bb |= 1 << (sq + 10); }
+    if r < 7 && f > 1 { bb |= 1 << (sq + 6); }
+    if r > 1 && f < 7 { bb |= 1 << (sq - 15); }
+    if r > 1 && f > 0 { bb |= 1 << (sq - 17); }
+    if r > 0 && f < 6 { bb |= 1 << (sq - 6); }
+    if r > 0 && f > 1 { bb |= 1 << (sq - 10); }
+    attacks[sq] = bb;
+    sq += 1;
+  }
+  attacks
+}
+
+const fn precompute_king_attacks() -> [Bitboard; 64] {
+  let mut attacks = [0; 64];
+  let mut sq = 0;
+  while sq < 64 {
+    let mut bb = 0;
+    let r = sq / 8;
+    let f = sq % 8;
+    if r < 7 { bb |= 1 << (sq + 8); }
+    if r > 0 { bb |= 1 << (sq - 8); }
+    if f < 7 { bb |= 1 << (sq + 1); }
+    if f > 0 { bb |= 1 << (sq - 1); }
+    if r < 7 && f < 7 { bb |= 1 << (sq + 9); }
+    if r < 7 && f > 0 { bb |= 1 << (sq + 7); }
+    if r > 0 && f < 7 { bb |= 1 << (sq - 7); }
+    if r > 0 && f > 0 { bb |= 1 << (sq - 9); }
+    attacks[sq] = bb;
+    sq += 1;
+  }
+  attacks
+}
+
+
+// BISHOP MAGIC NUMBERS
+static BISHOP_MAGIC_NUMBERS: [u64; 64] = [
     0x40440080810102,
     0x4831011a0a001e,
     0x206800840080a050,
@@ -643,7 +744,8 @@ static BISHOP_MAGICS: [u64; 64] = [
     0xc028814408020021,
 ];
 
-static ROOK_MAGICS: [u64; 64] = [
+// ROOK MAGIC NUMBERS (CORRECTED)
+static ROOK_MAGIC_NUMBERS: [u64; 64] = [
     0x4680002330804004,
     0x100106040008500,
     0x80200188100081,
@@ -709,117 +811,3 @@ static ROOK_MAGICS: [u64; 64] = [
     0x1089000400860001,
     0x4100089020c201,
 ];
-
-
-pub fn generate_captures(board: &Board, list: &mut MoveList) {
-  generate_pawn_captures(board, list);
-  generate_knight_captures(board, list);
-  generate_king_captures(board, list);
-  generate_sliding_captures(board, list);
-}
-
-fn generate_pawn_captures(board: &Board, list: &mut MoveList) {
-  let us = board.side_to_move;
-  let them = if us == Color::White { Color::Black } else { Color::White };
-  let our_pawns = board.pieces[PieceType::Pawn as usize][us as usize];
-  let their_pieces = board.occupancy[them as usize];
-
-  let rank_7 = if us == Color::White {
-     0xFF000000000000u64
-  } else {
-    0xFF00u64
-  };
-
-  let mut pawns = our_pawns;
-  while pawns != 0 {
-    let from_sq = pawns.trailing_zeros() as Square;
-    let from_bb = 1 << from_sq;
-
-    let mut attacks = PAWN_ATTACKS[us as usize][from_sq as usize] & their_pieces;
-    while attacks != 0 {
-      let to_sq = attacks.trailing_zeros() as Square;
-      if (from_bb & rank_7) !=0 {
-        list.push(moves::new(from_sq, to_sq, moves::QUEEN_PROMOTION_CAPTURE_FLAG));
-        list.push(moves::new(from_sq, to_sq, moves::ROOK_PROMOTION_CAPTURE_FLAG));
-        list.push(moves::new(from_sq, to_sq, moves::BISHOP_PROMOTION_CAPTURE_FLAG));
-        list.push(moves::new(from_sq, to_sq, moves::KNIGHT_PROMOTION_CAPTURE_FLAG));
-      } else {
-        list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
-      }
-      attacks &= attacks - 1;
-    }
-
-    if let Some(ep_sq) = board.en_passant {
-      if PAWN_ATTACKS[us as usize][from_sq as usize] & (1 << ep_sq) != 0 {
-        list.push(moves::new(from_sq, ep_sq, moves::EN_PASSANT_CAPTURE_FLAG));
-      }
-    }
-
-    pawns &= pawns - 1;
-  }
-}
-
-fn generate_knight_captures(board: &Board, list: &mut MoveList) {
-  let us = board.side_to_move;
-  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
-  let mut knights = board.pieces[PieceType::Knight as usize][us as usize];
-
-  while knights != 0 {
-    let from_sq = knights.trailing_zeros() as Square;
-    let attacks = KNIGHT_ATTACKS[from_sq as usize];
-    let mut captures = attacks & their_pieces;
-    
-    while captures != 0 {
-      let to_sq = captures.trailing_zeros() as Square;
-      list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
-      captures &= captures - 1;
-    }
-    knights &= knights - 1;
-  }
-}
-
-fn generate_king_captures(board: &Board, list: &mut MoveList) {
-  let us = board.side_to_move;
-  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
-  let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
-
-  let mut attacks = KING_ATTACKS[king_sq as usize] & their_pieces;
-  while attacks != 0 {
-    let to_sq = attacks.trailing_zeros() as Square;
-    list.push(moves::new(king_sq, to_sq, moves::CAPTURE_FLAG));
-    attacks &= attacks - 1;
-  }
-}
-
-fn generate_sliding_captures(board: &Board, list: &mut MoveList) {
-  let us = board.side_to_move;
-  let our_pieces = board.occupancy[us as usize];
-  let their_pieces = board.occupancy[if us == Color::White { 1 } else { 0 }];
-  let all_pieces = our_pieces | their_pieces;
-
-  let mut bishops = board.pieces[PieceType::Bishop as usize][us as usize]
-    | board.pieces[PieceType::Queen as usize][us as usize];
-  while bishops != 0 {
-    let from_sq = bishops.trailing_zeros() as Square;
-    let attacks = get_bishop_attacks(from_sq, all_pieces) & their_pieces;
-    add_sliding_captures(from_sq, attacks, list);
-    bishops &= bishops - 1;
-  }
-
-  let mut rooks = board.pieces[PieceType::Rook as usize][us as usize]
-    | board.pieces[PieceType::Queen as usize][us as usize];
-  while rooks != 0 {
-    let from_sq = rooks.trailing_zeros() as Square;
-    let attacks = get_rook_attacks(from_sq, all_pieces) & their_pieces;
-    add_sliding_captures(from_sq, attacks, list);
-    rooks &= rooks - 1;
-  }
-}
-
-fn add_sliding_captures(from_sq: Square, mut captures: Bitboard, list: &mut MoveList) {
-  while captures != 0 {
-    let to_sq = captures.trailing_zeros() as Square;
-    list.push(moves::new(from_sq, to_sq, moves::CAPTURE_FLAG));
-    captures &= captures - 1;
-  }
-}
