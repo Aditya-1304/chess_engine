@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::sync::OnceLock;
+use std::mem::MaybeUninit;
 
 use crate::board::Board;
 use crate::types::{Accumulator, Color, PieceType, Square};
@@ -655,9 +656,8 @@ unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumul
     }
     
     // Build clipped input vector (512 u8 values, all 0-127)
-    let mut input = AlignedInput {
-        data: [0u8; 512]
-    };
+    let mut input = MaybeUninit::<AlignedInput>::uninit();
+    let input_ptr = input.as_mut_ptr() as *mut u8;
     
     let zero = _mm256_setzero_si256();
     let max_val = _mm256_set1_epi16(127);
@@ -668,7 +668,7 @@ unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumul
         let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
         let packed = _mm256_packus_epi16(clamped, zero);
         let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
-        _mm_store_si128(input.data.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(permuted));
+        _mm_store_si128(input_ptr.add(i) as *mut __m128i, _mm256_castsi256_si128(permuted));
     }
 
     }
@@ -679,7 +679,7 @@ unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumul
             let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
             let packed = _mm256_packus_epi16(clamped, zero);
             let permuted = _mm256_permute4x64_epi64(packed, 0b11011000);
-            _mm_store_si128(input.data.as_mut_ptr().add(HALF_DIMENSIONS + i) as *mut __m128i, _mm256_castsi256_si128(permuted));
+            _mm_store_si128(input_ptr.add(HALF_DIMENSIONS + i) as *mut __m128i, _mm256_castsi256_si128(permuted));
         }
     }
 
@@ -693,7 +693,7 @@ unsafe fn evaluate_avx2(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumul
         unsafe {
             for j in (0..512).step_by(32) {
                 // input is u8 (0-127), weights are i8
-                let inp = _mm256_loadu_si256(input.data.as_ptr().add(j) as *const __m256i);
+                let inp = _mm256_load_si256(input_ptr.add(j) as *const __m256i);
                 let wgt = _mm256_loadu_si256(net.l1_weights.as_ptr().add(weights_base + j) as *const __m256i);
                 
                 // maddubs: treats first arg as unsigned, second as signed - perfect!
