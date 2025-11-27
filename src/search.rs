@@ -1,49 +1,51 @@
 use crate::{
-    board::Board, book::OpeningBook, eval, movegen, moves::{self, Move, MoveList}, see, syzygy, tt::{TTFlag, TranspositionTable}, types::{Color, PieceType}
+    board::Board,
+    book::OpeningBook,
+    eval,
+    movegen,
+    moves::{self, Move, MoveList},
+    see,
+    syzygy,
+    thread::SharedState,
+    tt::TTFlag,
+    types::{Color, PieceType},
 };
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 const INF: i32 = 32000;
 pub const MATE_SCORE: i32 = 31000;
 
-pub struct Searcher {
+const NODE_UPDATE_INTERVAL: u64 = 4096;
+
+/// Thread-local search state for multi-threaded search
+pub struct SearchThread {
+    pub thread_id: usize,
+    pub shared: Arc<SharedState>,
+    pub is_main: bool,
     pub nodes: u64,
+    pub local_nodes: u64,
     pub start_time: Instant,
     pub time_soft_limit: u128,
     pub time_hard_limit: u128,
-    pub stop: bool,
-    pub tt: TranspositionTable,
-    pub book: OpeningBook,
     pub killers: [[Option<Move>; 2]; 64],
     pub history: [[[i32; 64]; 2]; 6],
     pub counter_moves: [[Option<Move>; 64]; 6],
     pub prev_move: Option<Move>,
 }
 
-impl Searcher {
-    pub fn new() -> Self {
-        let book = OpeningBook::new("Perfect2023.bin");
-        if book.file.is_some() {
-            println!("info string Opening book loaded successfully");
-        } else {
-            println!("info string Warning: book.bin not found");
-        }
-
-        let keys = crate::zobrist::keys();
-        println!("--- DEBUG ZOBRIST KEYS ---");
-        println!("White Pawn A1 (Index 0):   {:016x}", keys.pieces[0][0][0]);
-        println!("Black King H8 (Index 767): {:016x}", keys.pieces[5][1][63]);
-        println!("Castle WK (Index 768):     {:016x}", keys.castling[1]);
-        println!("--------------------------");
-
+impl SearchThread {
+    pub fn new(thread_id: usize, shared: Arc<SharedState>, is_main: bool) -> Self {
         Self {
+            thread_id,
+            shared,
+            is_main,
             nodes: 0,
+            local_nodes: 0,
             start_time: Instant::now(),
-            time_soft_limit: 0,
-            time_hard_limit: 0,
-            stop: false,
-            tt: TranspositionTable::new(64), // 64MB default
-            book,
+            time_soft_limit: u128::MAX,
+            time_hard_limit: u128::MAX,
             killers: [[None; 2]; 64],
             history: [[[0; 64]; 2]; 6],
             counter_moves: [[None; 64]; 6],
@@ -51,126 +53,125 @@ impl Searcher {
         }
     }
 
+    #[inline]
+    fn should_stop(&self) -> bool {
+        self.shared.stop.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn set_stop(&self) {
+        self.shared.stop.store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn increment_nodes(&mut self) {
+        self.nodes += 1;
+        self.local_nodes += 1;
+
+        if self.local_nodes >= NODE_UPDATE_INTERVAL {
+            self.shared.nodes.fetch_add(self.local_nodes, Ordering::Relaxed);
+            self.local_nodes = 0;
+
+            if self.is_main && self.time_hard_limit != u128::MAX {
+                let elapsed = self.start_time.elapsed().as_millis();
+                if elapsed >= self.time_hard_limit {
+                    self.set_stop();
+                }
+            }
+        }
+    }
+
     pub fn search(&mut self, board: &mut Board, depth: u8) -> (i32, Option<Move>) {
+        
         self.nodes = 0;
+        self.local_nodes = 0;
         self.start_time = Instant::now();
-        self.stop = false;
-        self.tt.new_search();
         self.killers = [[None; 2]; 64];
         self.age_history();
-
-        if self.time_soft_limit == 0 {
-            self.time_soft_limit = u128::MAX;
-        }
-        if self.time_hard_limit == 0 {
-            self.time_hard_limit = u128::MAX;
-        }
 
         let mut best_move = None;
         let mut score = 0;
 
-        let mut root_moves = MoveList::new();
-        board.generate_pseudo_legal_moves(&mut root_moves);
-        let mut legal_moves = Vec::new();
-        for &m in root_moves.iter() {
-            let undo = board.make_move(m);
-            let us = if board.side_to_move == Color::White {
-                Color::Black
-            } else {
-                Color::White
-            };
-            let king_sq =
-                board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
-            if !board.is_square_attacked(king_sq, board.side_to_move) {
-                legal_moves.push(m);
-            }
-            board.unmake_move(m, undo);
-        }
-
-        if legal_moves.len() == 1 {
-            return (0, Some(legal_moves[0]));
-        }
-
-        let mut prev_best_move = None;
-        let mut stability = 0;
-        let mut last_iter_time = 0_u128;
-
-        println!("info string Zobrist Hash: {:x}", board.zobrist_hash);
-
-        // Book Probing
-        if let Some(book_move) = self.book.get_move(board.zobrist_hash) {
-            let mut move_list = MoveList::new();
-            board.generate_pseudo_legal_moves(&mut move_list);
-            let mut found_move = None;
-
-            for &m in move_list.iter() {
-                if moves::from_sq(m) == moves::from_sq(book_move)
-                    && moves::to_sq(m) == moves::to_sq(book_move)
-                {
-                    if moves::is_promotion(book_move) {
-                        if moves::is_promotion(m)
-                            && moves::promotion_piece(m) == moves::promotion_piece(book_move)
-                        {
-                            found_move = Some(m);
-                            break;
-                        }
-                    } else {
-                        found_move = Some(m);
-                        break;
-                    }
+        // Only main thread does early exit checks
+        if self.is_main {
+            // Check for single legal move
+            let mut root_moves = MoveList::new();
+            board.generate_pseudo_legal_moves(&mut root_moves);
+            let mut legal_moves = Vec::new();
+            for &m in root_moves.iter() {
+                let undo = board.make_move(m);
+                let us = if board.side_to_move == Color::White {
+                    Color::Black
+                } else {
+                    Color::White
+                };
+                let king_sq =
+                    board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+                if !board.is_square_attacked(king_sq, board.side_to_move) {
+                    legal_moves.push(m);
                 }
+                board.unmake_move(m, undo);
             }
-            if let Some(real_move) = found_move {
-                return (0, Some(real_move));
+
+            if legal_moves.len() == 1 {
+                return (0, Some(legal_moves[0]));
             }
-        }
 
-        // Syzygy DTZ Root Probing
-       if board.occupancy[2].count_ones() <= 6 {
-            if let Some(tb) = crate::syzygy::get_global_syzygy() {
-                if board.occupancy[2].count_ones() <= tb.max_pieces() {
-                    if let Some((from, to, promo, wdl)) = syzygy::probe_root(board, &tb) {
-                        let mut move_list = MoveList::new();
-                        board.generate_pseudo_legal_moves(&mut move_list);
+            // Syzygy DTZ Root Probing (only main thread)
+            if board.occupancy[2].count_ones() <= 6 {
+                if let Some(tb) = crate::syzygy::get_global_syzygy() {
+                    if board.occupancy[2].count_ones() <= tb.max_pieces() {
+                        if let Some((from, to, promo, wdl)) = syzygy::probe_root(board, &tb) {
+                            let mut move_list = MoveList::new();
+                            board.generate_pseudo_legal_moves(&mut move_list);
 
-                        for &m in move_list.iter() {
-                            if moves::from_sq(m) == from && moves::to_sq(m) == to {
-                                let promo_match = if promo > 0 {
-                                    if moves::is_promotion(m) {
-                                        let our_promo = match moves::promotion_piece(m) {
-                                            PieceType::Knight => 1,
-                                            PieceType::Bishop => 2,
-                                            PieceType::Rook => 3,
-                                            PieceType::Queen => 4,
-                                            _ => 0,
-                                        };
-                                        our_promo == promo
+                            for &m in move_list.iter() {
+                                if moves::from_sq(m) == from && moves::to_sq(m) == to {
+                                    let promo_match = if promo > 0 {
+                                        if moves::is_promotion(m) {
+                                            let our_promo = match moves::promotion_piece(m) {
+                                                PieceType::Knight => 1,
+                                                PieceType::Bishop => 2,
+                                                PieceType::Rook => 3,
+                                                PieceType::Queen => 4,
+                                                _ => 0,
+                                            };
+                                            our_promo == promo
+                                        } else {
+                                            false
+                                        }
                                     } else {
-                                        false
-                                    }
-                                } else {
-                                    !moves::is_promotion(m)
-                                };
-
-                                if promo_match {
-                                    let undo = board.make_move(m);
-                                    let us = if board.side_to_move == Color::White {
-                                        Color::Black
-                                    } else {
-                                        Color::White
+                                        !moves::is_promotion(m)
                                     };
-                                    let king_sq = board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
-                                    let legal = !board.is_square_attacked(king_sq, board.side_to_move);
-                                    board.unmake_move(m, undo);
 
-                                    if legal {
-                                        let tb_score = match wdl {
-                                            1 => 29000,   
-                                            -1 => -29000, 
-                                            _ => 0,       
+                                    if promo_match {
+                                        let undo = board.make_move(m);
+                                        let us = if board.side_to_move == Color::White {
+                                            Color::Black
+                                        } else {
+                                            Color::White
                                         };
-                                        println!("info string TB root move: {} (wdl={})", moves::format(m), wdl);
-                                        return (tb_score, Some(m));
+                                        let king_sq = board.pieces[PieceType::King as usize]
+                                            [us as usize]
+                                            .trailing_zeros()
+                                            as u8;
+                                        let legal =
+                                            !board.is_square_attacked(king_sq, board.side_to_move);
+                                        board.unmake_move(m, undo);
+
+                                        if legal {
+                                            let tb_score = match wdl {
+                                                1 => 29000,
+                                                -1 => -29000,
+                                                _ => 0,
+                                            };
+                                            println!(
+                                                "info string TB root move: {} (wdl={})",
+                                                moves::format(m),
+                                                wdl
+                                            );
+                                            return (tb_score, Some(m));
+                                        }
                                     }
                                 }
                             }
@@ -180,20 +181,21 @@ impl Searcher {
             }
         }
 
+        let mut prev_best_move = None;
+        let mut stability = 0;
+        let mut last_iter_time = 0_u128;
+
         let mut alpha = -INF;
         let mut beta = INF;
 
         // Iterative Deepening with Aspiration Windows
         for d in 1..=depth {
-            let elapsed = self.start_time.elapsed().as_millis();
-            if self.time_hard_limit != u128::MAX && elapsed >= self.time_hard_limit {
-                self.stop = true;
-            }
-            if self.stop {
+            if self.should_stop() {
                 break;
             }
 
-            if d > 1 && self.time_soft_limit != u128::MAX {
+            let elapsed = self.start_time.elapsed().as_millis();
+            if self.is_main && d > 1 && self.time_soft_limit != u128::MAX {
                 let projected = elapsed + last_iter_time.saturating_mul(3) / 2 + 5;
                 if projected >= self.time_soft_limit {
                     break;
@@ -217,16 +219,14 @@ impl Searcher {
                 let (s, m) = self.negamax(board, d, 0, alpha, beta, true);
                 search_score = s;
 
-                if self.stop {
+                if self.should_stop() {
                     break;
                 }
 
                 if s <= alpha {
-                    // Fail low: widen alpha downwards
                     alpha = (-INF).max(alpha - delta);
                     delta += delta / 2;
                 } else if s >= beta {
-                    // Fail high: widen beta upwards
                     if let Some(mv) = m {
                         best_move = Some(mv);
                     }
@@ -239,14 +239,13 @@ impl Searcher {
                     break;
                 }
 
-                // Safety valve
                 if delta > 3000 {
                     alpha = -INF;
                     beta = INF;
                 }
             }
 
-            if self.stop {
+            if self.should_stop() {
                 break;
             }
 
@@ -260,55 +259,72 @@ impl Searcher {
                 prev_best_move = Some(mv);
             }
 
-            let time_elapsed = self.start_time.elapsed().as_millis();
-            last_iter_time = time_elapsed.saturating_sub(iter_start_time);
-            let nps = if time_elapsed > 0 {
-                (self.nodes as u128 * 1000) / time_elapsed
-            } else {
-                0
-            };
+            // Only main thread prints info and manages time
+            if self.is_main {
+                let time_elapsed = self.start_time.elapsed().as_millis();
+                last_iter_time = time_elapsed.saturating_sub(iter_start_time);
 
-            print!("info depth {} score ", d);
-            if score > 30000 {
-                let mate_in = (31000 - score + 1) / 2;
-                print!("mate {}", mate_in);
-            } else if score < -30000 {
-                let mate_in = (31000 + score) / 2;
-                print!("mate -{}", mate_in);
-            } else {
-                print!("cp {}", score);
-            }
+                // Update global node count
+                self.shared
+                    .nodes
+                    .fetch_add(self.local_nodes, Ordering::Relaxed);
+                self.local_nodes = 0;
 
-            print!(" pv");
-            let mut pv_board = board.clone();
-            for _ in 0..d {
-                if let Some((mv, _, _, _)) = self.tt.probe(pv_board.zobrist_hash) {
-                    if mv != 0 {
-                        print!(" {}", moves::format(mv));
-                        pv_board.make_move(mv);
+                let total_nodes = self.shared.nodes.load(Ordering::Relaxed);
+
+                let nps = if time_elapsed > 0 {
+                    (total_nodes as u128 * 1000) / time_elapsed
+                } else {
+                    0
+                };
+
+                print!("info depth {} score ", d);
+                if score > 30000 {
+                    let mate_in = (31000 - score + 1) / 2;
+                    print!("mate {}", mate_in);
+                } else if score < -30000 {
+                    let mate_in = (31000 + score) / 2;
+                    print!("mate -{}", mate_in);
+                } else {
+                    print!("cp {}", score);
+                }
+
+                print!(" pv");
+                let mut pv_board = board.clone();
+                for _ in 0..d {
+                    if let Some((mv, _, _, _)) = self.shared.tt.probe(pv_board.zobrist_hash) {
+                        if mv != 0 {
+                            print!(" {}", moves::format(mv));
+                            pv_board.make_move(mv);
+                        } else {
+                            break;
+                        }
                     } else {
                         break;
                     }
-                } else {
+                }
+                println!(" nodes {} nps {} time {}", total_nodes, nps, time_elapsed);
+
+                if time_elapsed >= self.time_hard_limit {
+                    self.set_stop();
+                    break;
+                }
+                if time_elapsed >= self.time_soft_limit {
+                    self.set_stop();
+                    break;
+                }
+
+                if stability >= 4 && time_elapsed > self.time_soft_limit / 2 {
+                    self.set_stop();
                     break;
                 }
             }
-            println!(" nodes {} nps {} time {}", self.nodes, nps, time_elapsed);
-
-            if self.time_hard_limit != 0 && time_elapsed >= self.time_hard_limit {
-                self.stop = true;
-                break;
-            }
-            if self.time_soft_limit != 0 && time_elapsed >= self.time_soft_limit {
-                self.stop = true;
-                break;
-            }
-
-            if stability >= 4 && time_elapsed > self.time_soft_limit / 2 {
-                self.stop = true;
-                break;
-            }
         }
+
+        // Final node count update for helper threads
+        self.shared.nodes.fetch_add(self.local_nodes, Ordering::Relaxed);
+        self.local_nodes = 0;
+
         (score, best_move)
     }
 
@@ -321,23 +337,19 @@ impl Searcher {
         beta: i32,
         do_null: bool,
     ) -> (i32, Option<Move>) {
-        if self.nodes & 2047 == 0 {
-            if self.time_hard_limit != u128::MAX
-                && self.start_time.elapsed().as_millis() >= self.time_hard_limit
-            {
-                self.stop = true;
+        if self.is_main || (self.nodes & 1023 == 0) {
+            if self.should_stop() {
+                return (0, None);
             }
         }
-        if self.stop {
-            return (0, None);
-        }
+            
 
         let is_root = ply == 0;
         if !is_root && (board.halfmove_clock >= 100 || board.is_repetition()) {
             return (0, None);
         }
 
-        // Syzygy Probing
+        // Syzygy WDL Probing (non-root)
         if !is_root && board.occupancy[2].count_ones() <= 6 {
             if let Some(tb) = syzygy::get_global_syzygy() {
                 if board.occupancy[2].count_ones() <= tb.max_pieces() {
@@ -354,13 +366,11 @@ impl Searcher {
                                     return (tb_score, None);
                                 }
                             }
-
                             pyrrhic_rs::WdlProbeResult::Loss => {
                                 if tb_score <= alpha {
                                     return (tb_score, None);
                                 }
                             }
-
                             _ => {
                                 if tb_score >= beta || tb_score <= alpha {
                                     return (tb_score, None);
@@ -372,6 +382,7 @@ impl Searcher {
             }
         }
 
+        // Check Extension
         let in_check = board.is_square_attacked(
             board.pieces[PieceType::King as usize][board.side_to_move as usize].trailing_zeros()
                 as u8,
@@ -390,11 +401,11 @@ impl Searcher {
             return (self.quiescence(board, alpha, beta), None);
         }
 
-        self.nodes += 1;
+        self.increment_nodes();
 
-
+        // TT Probe
         let mut tt_move = None;
-        if let Some((mv, sc, d, flag)) = self.tt.probe(board.zobrist_hash) {
+        if let Some((mv, sc, d, flag)) = self.shared.tt.probe(board.zobrist_hash) {
             let is_valid = if mv != 0 {
                 let from = moves::from_sq(mv);
                 let to = moves::to_sq(mv);
@@ -409,7 +420,7 @@ impl Searcher {
                     }
                 }
             } else {
-                true 
+                true
             };
 
             if is_valid {
@@ -433,15 +444,15 @@ impl Searcher {
             }
         }
 
-        // Adaptive Null Move Pruning
+        // Null Move Pruning
         if do_null && !in_check && !is_root && depth >= 3 {
-            // Check we have non-pawn material
-            let dominated_by_pawns = 
-                (board.pieces[PieceType::Knight as usize][board.side_to_move as usize] |
-                 board.pieces[PieceType::Bishop as usize][board.side_to_move as usize] |
-                 board.pieces[PieceType::Rook as usize][board.side_to_move as usize] |
-                 board.pieces[PieceType::Queen as usize][board.side_to_move as usize]) == 0;
-            
+            let dominated_by_pawns = (board.pieces[PieceType::Knight as usize]
+                [board.side_to_move as usize]
+                | board.pieces[PieceType::Bishop as usize][board.side_to_move as usize]
+                | board.pieces[PieceType::Rook as usize][board.side_to_move as usize]
+                | board.pieces[PieceType::Queen as usize][board.side_to_move as usize])
+                == 0;
+
             if !dominated_by_pawns {
                 let static_eval = eval::evaluate(board);
                 if static_eval >= beta {
@@ -451,7 +462,6 @@ impl Searcher {
                         self.negamax(board, depth - 1 - r, ply + 1, -beta, -beta + 1, false);
                     board.unmake_null_move(old_ep);
                     let null_score = -score;
-                    // Don't trust mate scores from null move
                     if null_score >= beta && null_score < 30000 {
                         return (beta, None);
                     }
@@ -459,7 +469,8 @@ impl Searcher {
             }
         }
 
-        if !is_root && !in_check&& depth <= 6 {
+        // Reverse Futility Pruning
+        if !is_root && !in_check && depth <= 6 {
             let static_eval = eval::evaluate(board);
             let margin = 80 * (depth as i32);
             if static_eval - margin >= beta {
@@ -467,6 +478,7 @@ impl Searcher {
             }
         }
 
+        // IID
         if tt_move.is_none() && depth >= 4 {
             let iid_depth = depth - 2;
             let (_, iid_move) = self.negamax(board, iid_depth, ply, alpha, beta, false);
@@ -475,13 +487,11 @@ impl Searcher {
             }
         }
 
-        
-
         let mut move_list = MoveList::new();
         board.generate_pseudo_legal_moves(&mut move_list);
 
-        // Score moves ONCE
-        let mut move_scores = [0; 256];
+        // Score moves - add thread_id for slight move ordering variation (Lazy SMP)
+        let mut move_scores = [0i32; 256];
         let move_slice = move_list.as_mut_slice();
         for i in 0..move_slice.len() {
             let m = move_slice[i];
@@ -498,7 +508,7 @@ impl Searcher {
                     }
                 }
 
-                if let Some(prev) = self.prev_move{
+                if let Some(prev) = self.prev_move {
                     let prev_pt = board.piece_type_on(moves::to_sq(prev));
                     if let Some(ppt) = prev_pt {
                         let prev_to = moves::to_sq(prev);
@@ -508,15 +518,16 @@ impl Searcher {
                     }
                 }
                 if move_scores[i] == 0 {
-                    let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
-                    let c = board.side_to_move;
-                    let to = moves::to_sq(m);
-                    move_scores[i] = self.history[pt as usize][c as usize][to as usize];
+                    if let Some(pt) = board.piece_type_on(moves::from_sq(m)) {
+                        let c = board.side_to_move;
+                        let to = moves::to_sq(m);
+                        move_scores[i] = self.history[pt as usize][c as usize][to as usize];
+                        // Add small thread-based variation for Lazy SMP diversity
+                        move_scores[i] += ((self.thread_id as i32) * 7) % 13;
+                    }
                 }
             }
         }
-
-        
 
         // Futility Pruning Setup
         let mut futility_pruning = false;
@@ -538,7 +549,7 @@ impl Searcher {
 
         for i in 0..move_list.len() {
             // Selection Sort
-            let mut best_pick_score = -2000000000;
+            let mut best_pick_score = i32::MIN;
             let mut best_pick_idx = i;
             for j in i..move_list.len() {
                 if move_scores[j] > best_pick_score {
@@ -552,7 +563,7 @@ impl Searcher {
                 move_scores.swap(i, best_pick_idx);
             }
 
-            let m = move_list.iter().nth(i).unwrap().clone();
+            let m = move_list.get(i);
 
             // Futility Pruning Check
             if futility_pruning && !moves::is_capture(m) && !moves::is_promotion(m) {
@@ -560,20 +571,33 @@ impl Searcher {
                 continue;
             }
 
-            let lmp_threshold = if depth <= 1 { 3 } else if depth <= 2 { 6 } else if depth <= 3 { 10 } else { 15 };
-            if !is_root && !in_check && depth <= 4 && legal_moves > lmp_threshold 
-                && !moves::is_capture(m) && !moves::is_promotion(m) {
+            // LMP
+            let lmp_threshold = if depth <= 1 {
+                3
+            } else if depth <= 2 {
+                6
+            } else if depth <= 3 {
+                10
+            } else {
+                15
+            };
+            if !is_root
+                && !in_check
+                && depth <= 4
+                && legal_moves > lmp_threshold
+                && !moves::is_capture(m)
+                && !moves::is_promotion(m)
+            {
                 continue;
             }
 
-
+            // SEE Pruning
             if !is_root && depth >= 1 && moves::is_capture(m) && legal_moves > 0 {
                 let see_value = see::see(board, m);
-
                 let threshold = -20 * (depth as i32);
                 if see_value < threshold {
                     continue;
-                } 
+                }
             }
 
             let undo = board.make_move(m);
@@ -594,10 +618,12 @@ impl Searcher {
             let mut score;
             let old_prev = self.prev_move;
             self.prev_move = Some(m);
+
             if legal_moves == 1 {
                 let (s, _) = self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
                 score = -s;
             } else {
+                // LMR
                 let mut reduction = 0;
                 if depth >= 3
                     && legal_moves > 1
@@ -635,7 +661,8 @@ impl Searcher {
 
             self.prev_move = old_prev;
             board.unmake_move(m, undo);
-            if self.stop {
+
+            if self.should_stop() {
                 return (0, None);
             }
 
@@ -677,17 +704,23 @@ impl Searcher {
                         self.history[pt as usize][c as usize][to as usize] /= 2;
                     }
 
-                    for j in 0..quiet_count.saturating_sub(1){
+                    // History malus for failed quiets
+                    for j in 0..quiet_count.saturating_sub(1) {
                         let failed_m = searched_quiets[j];
                         if let Some(pt) = board.piece_type_on(moves::from_sq(failed_m)) {
                             let to = moves::to_sq(failed_m);
-                            self.history[pt as usize][board.side_to_move as usize][to as usize] -= (depth as i32) * (depth as i32);
-                            if self.history[pt as usize][board.side_to_move as usize][to as usize] < -20000 {
-                                self.history[pt as usize][board.side_to_move as usize][to as usize] = -20000;
+                            self.history[pt as usize][board.side_to_move as usize][to as usize] -=
+                                (depth as i32) * (depth as i32);
+                            if self.history[pt as usize][board.side_to_move as usize][to as usize]
+                                < -20000
+                            {
+                                self.history[pt as usize][board.side_to_move as usize][to as usize] =
+                                    -20000;
                             }
                         }
                     }
 
+                    // Counter move update
                     if let Some(prev) = old_prev {
                         if let Some(prev_pt) = board.piece_type_on(moves::to_sq(prev)) {
                             let prev_to = moves::to_sq(prev);
@@ -723,12 +756,12 @@ impl Searcher {
         };
 
         let move_to_store = if flag == TTFlag::Alpha {
-            None 
+            None
         } else {
             best_move
         };
 
-        self.tt.store(
+        self.shared.tt.store(
             board.zobrist_hash,
             move_to_store,
             score_to_tt(best_score, ply),
@@ -739,17 +772,13 @@ impl Searcher {
     }
 
     fn quiescence(&mut self, board: &mut Board, mut alpha: i32, beta: i32) -> i32 {
-        if self.nodes & 2047 == 0 {
-            if self.time_hard_limit != u128::MAX
-                && self.start_time.elapsed().as_millis() >= self.time_hard_limit
-            {
-                self.stop = true;
+        if self.is_main || (self.nodes & 1023 == 0) {
+            if self.should_stop() {
+                return 0;
             }
-        }
-        if self.stop {
-            return 0;
-        }
-        self.nodes += 1;
+        } 
+        
+        self.increment_nodes();
 
         let stand_pat = eval::evaluate(board);
         if stand_pat >= beta {
@@ -757,7 +786,7 @@ impl Searcher {
         }
 
         // Delta Pruning
-        let delta = 975; // Queen value + margin
+        let delta = 975;
         if stand_pat + delta < alpha {
             return alpha;
         }
@@ -769,7 +798,6 @@ impl Searcher {
         let mut move_list = MoveList::new();
         movegen::generate_captures(board, &mut move_list);
 
-        // Simple sort for qsearch
         let mut move_scores = [0; 256];
         for i in 0..move_list.len() {
             let m = move_list.get(i);
@@ -777,7 +805,7 @@ impl Searcher {
         }
 
         for i in 0..move_list.len() {
-            let mut best_pick_score = -2000000000;
+            let mut best_pick_score = i32::MIN;
             let mut best_pick_idx = i;
             for j in i..move_list.len() {
                 if move_scores[j] > best_pick_score {
@@ -875,5 +903,48 @@ fn score_from_tt(score: i32, ply: i32) -> i32 {
         score + ply
     } else {
         score
+    }
+}
+
+// ============================================================================
+// Single-threaded Searcher (backwards compatibility)
+// ============================================================================
+
+pub struct Searcher {
+    pub nodes: u64,
+    pub start_time: Instant,
+    pub time_soft_limit: u128,
+    pub time_hard_limit: u128,
+    pub stop: bool,
+    pub tt: crate::tt::TranspositionTable,
+    pub book: OpeningBook,
+    pub killers: [[Option<Move>; 2]; 64],
+    pub history: [[[i32; 64]; 2]; 6],
+    pub counter_moves: [[Option<Move>; 64]; 6],
+    pub prev_move: Option<Move>,
+}
+
+impl Searcher {
+    pub fn new() -> Self {
+        let book = OpeningBook::new("Perfect2023.bin");
+        if book.file.is_some() {
+            println!("info string Opening book loaded successfully");
+        } else {
+            println!("info string Warning: book.bin not found");
+        }
+
+        Self {
+            nodes: 0,
+            start_time: Instant::now(),
+            time_soft_limit: 0,
+            time_hard_limit: 0,
+            stop: false,
+            tt: crate::tt::TranspositionTable::new(64),
+            book,
+            killers: [[None; 2]; 64],
+            history: [[[0; 64]; 2]; 6],
+            counter_moves: [[None; 64]; 6],
+            prev_move: None,
+        }
     }
 }

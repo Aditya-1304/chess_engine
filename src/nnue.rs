@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek};
 use std::sync::OnceLock;
 
 use crate::board::Board;

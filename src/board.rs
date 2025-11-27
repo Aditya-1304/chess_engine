@@ -106,6 +106,21 @@ static CASTLE_MASK: [u8; 64] = [
 ];
 
 impl Board {
+
+    pub fn clone_for_search(&self) -> Self {
+      Board {
+        pieces: self.pieces,
+        occupancy: self.occupancy,
+        side_to_move: self.side_to_move,
+        castling_rights: self.castling_rights,
+        en_passant: self.en_passant,
+        halfmove_clock: self.halfmove_clock,
+        fullmove_number: self.fullmove_number,
+        zobrist_hash: self.zobrist_hash,
+        history: Vec::with_capacity(128),
+        accumulator: self.accumulator,
+      }
+    }
     pub fn from_fen(fen: &str) -> Result<Board, &'static str> {
         let mut board = Board::default();
         let parts: Vec<&str> = fen.split_whitespace().collect();
