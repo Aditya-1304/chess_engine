@@ -552,8 +552,7 @@ fn evaluate_scalar(net: &Network, stm_acc: &Accumulator, nstm_acc: &Accumulator)
         let inp = crelu_i32(l2_out[j]) as i32;
         output += inp * (net.l3_weights[j] as i32);
     }
-
-    // Final scaling
+    
     (output / FV_SCALE).clamp(-30000, 30000)
 }
 

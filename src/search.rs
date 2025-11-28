@@ -893,10 +893,6 @@ fn score_from_tt(score: i32, ply: i32) -> i32 {
     }
 }
 
-// ============================================================================
-// Single-threaded Searcher (backwards compatibility)
-// ============================================================================
-
 pub struct Searcher {
     pub nodes: u64,
     pub start_time: Instant,

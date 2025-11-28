@@ -483,7 +483,7 @@ impl Board {
         self.side_to_move = them;
         self.zobrist_hash = hash;
 
-        // 4. King Move Refresh (Full refresh if king moved)
+        //  King Move Refresh 
         if has_nnue && moving_piece == PieceType::King {
             self.accumulator = nnue::refresh_accumulator(self);
         }
@@ -570,20 +570,18 @@ impl Board {
         let to = moves::to_sq(m);
         let flag = moves::flag(m);
 
-        // Max 5 updates per move (move from/to + capture + castle rook from/to)
-        // We need separate batches for White and Black accumulators
         let mut batch_w = [(0usize, false); 8];
         let mut batch_b = [(0usize, false); 8];
         let mut count = 0;
 
-        // 1. Moving piece (remove from source)
+        // Moving piece (remove from source)
         let idx_w = nnue::halfkp_index(wk_sq, from, moving_piece, us, Color::White);
         let idx_b = nnue::halfkp_index(bk_sq, from, moving_piece, us, Color::Black);
         batch_w[count] = (idx_w, if forward { false } else { true });
         batch_b[count] = (idx_b, if forward { false } else { true });
         count += 1;
 
-        // 2. Capture handling
+        // Capture handling
         if let Some(cap_pt) = captured {
             let (cap_sq, cap_pt) = if flag == moves::EN_PASSANT_CAPTURE_FLAG {
                 (if us == Color::White { to - 8 } else { to + 8 }, PieceType::Pawn)
@@ -598,7 +596,7 @@ impl Board {
             count += 1;
         }
 
-        // 3. Moving piece (add to dest) or Promotion
+        // Moving piece or Promotion
         let (dest_pt, dest_sq) = if moves::is_promotion(m) {
             (moves::promotion_piece(m), to)
         } else {
