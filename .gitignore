@@ -2,7 +2,8 @@
 PLAN.md
 .agent
 perf.*
-movegen_prev.txt
+*.txt
 profile.json.*
 flame*
 pgo*
+syzygy/*

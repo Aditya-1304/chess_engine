@@ -1,17 +1,15 @@
 use crate::{
     board::Board,
     book::OpeningBook,
-    eval,
-    movegen,
+    eval, movegen,
     moves::{self, Move, MoveList},
-    see,
-    syzygy,
+    see, syzygy,
     thread::SharedState,
     tt::TTFlag,
     types::{Color, PieceType},
 };
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 const INF: i32 = 32000;
@@ -69,7 +67,9 @@ impl SearchThread {
         self.local_nodes += 1;
 
         if self.local_nodes >= NODE_UPDATE_INTERVAL {
-            self.shared.nodes.fetch_add(self.local_nodes, Ordering::Relaxed);
+            self.shared
+                .nodes
+                .fetch_add(self.local_nodes, Ordering::Relaxed);
             self.local_nodes = 0;
 
             if self.is_main && self.time_hard_limit != u128::MAX {
@@ -82,7 +82,6 @@ impl SearchThread {
     }
 
     pub fn search(&mut self, board: &mut Board, depth: u8) -> (i32, Option<Move>) {
-        
         self.nodes = 0;
         self.local_nodes = 0;
         self.start_time = Instant::now();
@@ -322,7 +321,9 @@ impl SearchThread {
         }
 
         // Final node count update for helper threads
-        self.shared.nodes.fetch_add(self.local_nodes, Ordering::Relaxed);
+        self.shared
+            .nodes
+            .fetch_add(self.local_nodes, Ordering::Relaxed);
         self.local_nodes = 0;
 
         (score, best_move)
@@ -340,7 +341,6 @@ impl SearchThread {
         if self.nodes & 2047 == 0 && self.should_stop() {
             return (0, None);
         }
-            
 
         let is_root = ply == 0;
         if !is_root && (board.halfmove_clock >= 100 || board.is_repetition()) {
@@ -381,11 +381,12 @@ impl SearchThread {
         }
 
         // Check Extension
-        let them = if board.side_to_move == Color::White { Color::Black } else { Color::White };
-        let in_check = board.is_square_attacked(
-            board.king_sq[board.side_to_move as usize],
-            them
-        );
+        let them = if board.side_to_move == Color::White {
+            Color::Black
+        } else {
+            Color::White
+        };
+        let in_check = board.is_square_attacked(board.king_sq[board.side_to_move as usize], them);
 
         if in_check {
             depth += 1;
@@ -453,7 +454,6 @@ impl SearchThread {
                 | board.pieces[PieceType::Queen as usize][board.side_to_move as usize])
                 == 0;
 
-            
             if !dominated_by_pawns && static_eval >= beta {
                 let r = if depth > 6 { 3 } else { 2 };
                 let old_ep = board.make_null_move();
@@ -588,7 +588,7 @@ impl SearchThread {
             }
 
             // SEE Pruning
-            if !is_root && depth >= 1 && moves::is_capture(m) && legal_moves > 0 {
+            if !is_root && !in_check && depth >= 1 && moves::is_capture(m) && legal_moves > 0 {
                 let see_value = see::see(board, m);
                 let threshold = -20 * (depth as i32);
                 if see_value < threshold {
@@ -710,8 +710,8 @@ impl SearchThread {
                             if self.history[pt as usize][board.side_to_move as usize][to as usize]
                                 < -20000
                             {
-                                self.history[pt as usize][board.side_to_move as usize][to as usize] =
-                                    -20000;
+                                self.history[pt as usize][board.side_to_move as usize]
+                                    [to as usize] = -20000;
                             }
                         }
                     }
@@ -751,15 +751,9 @@ impl SearchThread {
             TTFlag::Exact
         };
 
-        let move_to_store = if flag == TTFlag::Alpha {
-            None
-        } else {
-            best_move
-        };
-
         self.shared.tt.store(
             board.zobrist_hash,
-            move_to_store,
+            best_move,
             score_to_tt(best_score, ply),
             depth,
             flag,
@@ -771,7 +765,7 @@ impl SearchThread {
         if self.nodes & 2047 == 0 && self.should_stop() {
             return 0;
         }
-        
+
         self.increment_nodes();
 
         let stand_pat = eval::evaluate(board);
