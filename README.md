@@ -66,6 +66,10 @@ To ensure the engine plays at its maximum strength, you need to place the follow
     *   **Recommendation**: Download 3, 4, 5 and 6-piece (only if you want super good endgames as they consume a lot of space and memory, 2-3-5 is fine) tables.
     *   *Warning*: 7-piece tables require terabytes of RAM. Stick to 5-piece tables for standard use.
 
+## Feel free to contribute
+Reach out to me on X: [x](https://x.com/AdityaMandal_)
+Or open issue or even better contribute to this project by raising PR
+
 ## License
 
 [MIT License](LICENSE)
