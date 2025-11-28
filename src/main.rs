@@ -3,7 +3,7 @@ use chess_engine::{
     movegen,
     moves::{self, Move},
     nnue,
-    search::Searcher,
+    thread::ThreadPool,
     types::PieceType,
     uci,
 };
@@ -19,7 +19,9 @@ fn main() {
     match nnue::Network::load("nn-62ef826d1a6d.nnue") {
         Ok(net) => {
             nnue::NETWORK.set(net).ok();
+            nnue::init_cpu_features();
             println!("NNUE loaded successfully!");
+            println!("NNUE enabled: {}", nnue::is_enabled());  
         }
         Err(e) => {
             println!("Warning: Could not load NNUE: {}", e);
@@ -106,15 +108,26 @@ fn run_search(board: &mut Board, depth: u8) {
     println!("Searching depth {}...", depth);
     println!("{}", board);
 
-    let mut searcher = Searcher::new();
+    // Get number of threads
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(1);
+
+    // let num_threads = 1;
+
+    println!("Using {} threads", num_threads);
+
+    let thread_pool = ThreadPool::new(num_threads, 128); // 128MB TT
     let start = Instant::now();
 
-    let (score, best_move) = searcher.search(board, depth);
+    // Search with no time limit (infinite time)
+    let (score, best_move) = thread_pool.search(board, depth, u128::MAX, u128::MAX);
 
     let duration = start.elapsed();
     let seconds = duration.as_secs_f64();
+    let total_nodes = thread_pool.total_nodes();
     let nps = if seconds > 0.0 {
-        (searcher.nodes as f64 / seconds) as u64
+        (total_nodes as f64 / seconds) as u64
     } else {
         0
     };
@@ -137,9 +150,10 @@ fn run_search(board: &mut Board, depth: u8) {
         println!("Score:     {:.2}", score as f32 / 100.0);
     }
 
-    println!("Nodes:     {}", searcher.nodes);
+    println!("Nodes:     {}", total_nodes);
     println!("Time:      {:.3} s", seconds);
     println!("NPS:       {}", nps);
+    println!("Threads:   {}", num_threads);
     println!("-----------------------------");
 }
 
@@ -181,4 +195,3 @@ fn print_help() {
     println!("  search <depth>         : Run alpha-beta search");
     println!("  search <depth> \"<FEN>\" : Run search on specific position");
 }
-

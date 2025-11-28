@@ -10,12 +10,12 @@ use crate::{
 
 pub type ZHash = u64;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub struct UndoInfo {
   pub old_castling_rights: u8,
   pub old_en_passant: Option<Square>,
   pub old_halfmove_clock: u8,
-  pub captured_piece_type: Option<PieceType>,
+  pub captured_piece: u8,
   pub old_zobrist_hash: ZHash,
 }
 
@@ -31,6 +31,7 @@ pub struct Board {
   pub zobrist_hash: ZHash,
   pub history: Vec<UndoInfo>,
   pub accumulator: [Accumulator; 2],
+  pub king_sq: [Square; 2],
 }
 
 const WK_CASTLE: u8 = 0b0001;
@@ -106,6 +107,22 @@ static CASTLE_MASK: [u8; 64] = [
 ];
 
 impl Board {
+
+    pub fn clone_for_search(&self) -> Self {
+      Board {
+        pieces: self.pieces,
+        occupancy: self.occupancy,
+        side_to_move: self.side_to_move,
+        castling_rights: self.castling_rights,
+        en_passant: self.en_passant,
+        halfmove_clock: self.halfmove_clock,
+        fullmove_number: self.fullmove_number,
+        zobrist_hash: self.zobrist_hash,
+        history: Vec::with_capacity(128),
+        accumulator: self.accumulator,
+        king_sq: self.king_sq,
+      }
+    }
     pub fn from_fen(fen: &str) -> Result<Board, &'static str> {
         let mut board = Board::default();
         let parts: Vec<&str> = fen.split_whitespace().collect();
@@ -174,10 +191,17 @@ impl Board {
 
         board.halfmove_clock = parts[4].parse().unwrap_or(0);
         board.fullmove_number = parts[5].parse().unwrap_or(1);
+
+        board.king_sq[Color::White as usize] = 
+            board.pieces[PieceType::King as usize][Color::White as usize].trailing_zeros() as Square;
+        board.king_sq[Color::Black as usize] = 
+            board.pieces[PieceType::King as usize][Color::Black as usize].trailing_zeros() as Square;
+
+        
         board.zobrist_hash = board.calculate_zobrist_hash();
 
         // Initialize NNUE
-        if nnue::NETWORK.get().is_some() {
+        if nnue::is_enabled() {
             board.accumulator = nnue::refresh_accumulator(&board);
         }
 
@@ -360,21 +384,21 @@ impl Board {
         } else {
             None
         };
+        let captured_byte = if let Some(pt) = captured { pt as u8 } else { 6 }; // 6 = None
 
-        // Save State
         let undo = UndoInfo {
-            old_castling_rights: self.castling_rights,
-            old_en_passant: self.en_passant,
-            old_halfmove_clock: self.halfmove_clock,
-            captured_piece_type: captured,
-            old_zobrist_hash: self.zobrist_hash,
+        old_castling_rights: self.castling_rights,
+        old_en_passant: self.en_passant,
+        old_halfmove_clock: self.halfmove_clock,
+        captured_piece: captured_byte,
+        old_zobrist_hash: self.zobrist_hash,
         };
         self.history.push(undo.clone());
 
         // NNUE Incremental Updates
-        if nnue::NETWORK.get().is_some() {
-            if moving_piece == PieceType::King {
-            } else {
+        let has_nnue = nnue::is_enabled();
+        if has_nnue {
+            if moving_piece != PieceType::King {
                 self.apply_nnue_updates(m, moving_piece, captured, us, them, true);
             }
         }
@@ -401,6 +425,10 @@ impl Board {
         }
 
         self.move_piece(moving_piece, us, from, to);
+        if moving_piece == PieceType::King {
+            self.king_sq[us as usize] = to;
+        }
+
         hash ^= keys.pieces[moving_piece as usize][us as usize][from as usize];
         hash ^= keys.pieces[moving_piece as usize][us as usize][to as usize];
 
@@ -455,8 +483,8 @@ impl Board {
         self.side_to_move = them;
         self.zobrist_hash = hash;
 
-        // 4. King Move Refresh (Full refresh if king moved)
-        if nnue::NETWORK.get().is_some() && moving_piece == PieceType::King {
+        //  King Move Refresh 
+        if has_nnue && moving_piece == PieceType::King {
             self.accumulator = nnue::refresh_accumulator(self);
         }
 
@@ -500,7 +528,13 @@ impl Board {
 
         self.move_piece(moving_piece, us, to, from);
 
-        if let Some(cap_pt) = undo.captured_piece_type {
+        if moving_piece == PieceType::King {
+            self.king_sq[us as usize] = from;
+        }
+
+        let captured_piece_type = if undo.captured_piece == 6 { None } else { Some(PieceType::from(undo.captured_piece as usize)) };
+
+        if let Some(cap_pt) = captured_piece_type {
             if flag == moves::EN_PASSANT_CAPTURE_FLAG {
                 let cap_sq = if us == Color::White { to - 8 } else { to + 8 };
                 self.add_piece(PieceType::Pawn, them, cap_sq);
@@ -509,12 +543,11 @@ impl Board {
             }
         }
 
-        if nnue::NETWORK.get().is_some() {
+        if nnue::is_enabled() {
             if moving_piece == PieceType::King {
-
                 self.accumulator = nnue::refresh_accumulator(self);
             } else {
-                self.apply_nnue_updates(m, moving_piece, undo.captured_piece_type, us, them, false);
+                self.apply_nnue_updates(m, moving_piece, captured_piece_type, us, them, false);
             }
         }
     }
@@ -530,66 +563,90 @@ impl Board {
         forward: bool,
     ) {
 
-        let wk_sq = self.pieces[PieceType::King as usize][Color::White as usize].trailing_zeros() as u8;
-        let bk_sq = self.pieces[PieceType::King as usize][Color::Black as usize].trailing_zeros() as u8;
+        let wk_sq = self.king_sq[Color::White as usize];
+        let bk_sq = self.king_sq[Color::Black as usize];
 
         let from = moves::from_sq(m);
         let to = moves::to_sq(m);
         let flag = moves::flag(m);
 
-        let mut updates = [(0u8, PieceType::Pawn, Color::White, false); 8];
+        let mut batch_w = [(0usize, false); 8];
+        let mut batch_b = [(0usize, false); 8];
         let mut count = 0;
 
-        updates[count] = (from, moving_piece, us, false);
+        // Moving piece (remove from source)
+        let idx_w = nnue::halfkp_index(wk_sq, from, moving_piece, us, Color::White);
+        let idx_b = nnue::halfkp_index(bk_sq, from, moving_piece, us, Color::Black);
+        batch_w[count] = (idx_w, if forward { false } else { true });
+        batch_b[count] = (idx_b, if forward { false } else { true });
         count += 1;
 
-        // Capture handking
+        // Capture handling
         if let Some(cap_pt) = captured {
-            if flag == moves::EN_PASSANT_CAPTURE_FLAG {
-                let cap_sq = if us == Color::White { to - 8 } else { to + 8 };
-                updates[count] = (cap_sq, PieceType::Pawn, them, false);
-                count += 1;
+            let (cap_sq, cap_pt) = if flag == moves::EN_PASSANT_CAPTURE_FLAG {
+                (if us == Color::White { to - 8 } else { to + 8 }, PieceType::Pawn)
             } else {
-                updates[count] = (to, cap_pt, them, false);
-                count += 1;
-            }
+                (to, cap_pt)
+            };
+            
+            let idx_w = nnue::halfkp_index(wk_sq, cap_sq, cap_pt, them, Color::White);
+            let idx_b = nnue::halfkp_index(bk_sq, cap_sq, cap_pt, them, Color::Black);
+            batch_w[count] = (idx_w, if forward { false } else { true });
+            batch_b[count] = (idx_b, if forward { false } else { true });
+            count += 1;
         }
 
-        if moves::is_promotion(m) {
-            updates[count] = (to, moves::promotion_piece(m), us, true);
-            count += 1;
+        // Moving piece or Promotion
+        let (dest_pt, dest_sq) = if moves::is_promotion(m) {
+            (moves::promotion_piece(m), to)
         } else {
-            updates[count] = (to, moving_piece, us, true);
-            count += 1;
-        }
+            (moving_piece, to)
+        };
+        
+        let idx_w = nnue::halfkp_index(wk_sq, dest_sq, dest_pt, us, Color::White);
+        let idx_b = nnue::halfkp_index(bk_sq, dest_sq, dest_pt, us, Color::Black);
+        batch_w[count] = (idx_w, if forward { true } else { false });
+        batch_b[count] = (idx_b, if forward { true } else { false });
+        count += 1;
 
-        // Castle handling
+        // 4. Castle handling (Rook move)
         if flag == moves::KING_CASTLE_FLAG {
             let (r_from, r_to) = if us == Color::White { (7, 5) } else { (63, 61) };
-            updates[count] = (r_from, PieceType::Rook, us, false);
+            
+            // Remove rook from old square
+            let idx_w_rem = nnue::halfkp_index(wk_sq, r_from, PieceType::Rook, us, Color::White);
+            let idx_b_rem = nnue::halfkp_index(bk_sq, r_from, PieceType::Rook, us, Color::Black);
+            batch_w[count] = (idx_w_rem, if forward { false } else { true });
+            batch_b[count] = (idx_b_rem, if forward { false } else { true });
             count += 1;
-            updates[count] = (r_to, PieceType::Rook, us, true);
+            
+            // Add rook to new square
+            let idx_w_add = nnue::halfkp_index(wk_sq, r_to, PieceType::Rook, us, Color::White);
+            let idx_b_add = nnue::halfkp_index(bk_sq, r_to, PieceType::Rook, us, Color::Black);
+            batch_w[count] = (idx_w_add, if forward { true } else { false });
+            batch_b[count] = (idx_b_add, if forward { true } else { false });
             count += 1;
         } else if flag == moves::QUEEN_CASTLE_FLAG {
             let (r_from, r_to) = if us == Color::White { (0, 3) } else { (56, 59) };
-            updates[count] = (r_from, PieceType::Rook, us, false);
+            
+            // Remove rook from old square
+            let idx_w_rem = nnue::halfkp_index(wk_sq, r_from, PieceType::Rook, us, Color::White);
+            let idx_b_rem = nnue::halfkp_index(bk_sq, r_from, PieceType::Rook, us, Color::Black);
+            batch_w[count] = (idx_w_rem, if forward { false } else { true });
+            batch_b[count] = (idx_b_rem, if forward { false } else { true });
             count += 1;
-            updates[count] = (r_to, PieceType::Rook, us, true);
+            
+            // Add rook to new square
+            let idx_w_add = nnue::halfkp_index(wk_sq, r_to, PieceType::Rook, us, Color::White);
+            let idx_b_add = nnue::halfkp_index(bk_sq, r_to, PieceType::Rook, us, Color::Black);
+            batch_w[count] = (idx_w_add, if forward { true } else { false });
+            batch_b[count] = (idx_b_add, if forward { true } else { false });
             count += 1;
         }
 
-        for i in 0..count {
-            let (sq, pt, color, is_add) = updates[i];
-            let final_add = if forward { is_add } else { !is_add };
-
-            // White's accumulator uses white king
-            let idx_w = nnue::halfkp_index(wk_sq, sq, pt, color, Color::White);
-            nnue::update_feature(&mut self.accumulator[0], idx_w, final_add);
-
-            // Black's accumulator uses black king
-            let idx_b = nnue::halfkp_index(bk_sq, sq, pt, color, Color::Black);
-            nnue::update_feature(&mut self.accumulator[1], idx_b, final_add);
-        }
+        // Apply batches
+        nnue::update_feature_batch(&mut self.accumulator[0], &batch_w[..count]);
+        nnue::update_feature_batch(&mut self.accumulator[1], &batch_b[..count]);
     }
 
     pub fn generate_pseudo_legal_moves(&self, list: &mut MoveList) {
@@ -782,6 +839,7 @@ impl Default for Board {
             zobrist_hash: 0,
             history: Vec::new(),
             accumulator: [Accumulator::default(); 2],
+            king_sq: [4, 60],
         }
     }
 }

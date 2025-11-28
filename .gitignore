@@ -1,3 +1,9 @@
 /target
 PLAN.md
 .agent
+perf.*
+*.txt
+profile.json.*
+flame*
+pgo*
+syzygy/*

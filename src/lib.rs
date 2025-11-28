@@ -12,3 +12,4 @@ pub mod polygot_keys;
 pub mod nnue;
 pub mod syzygy;
 pub mod see;
+pub mod thread;
