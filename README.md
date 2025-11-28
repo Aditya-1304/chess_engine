@@ -26,7 +26,7 @@ If you prefer to build the engine yourself, you will need [Rust](https://www.rus
 
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/YOUR_USERNAME/chess_engine.git
+    git clone https://github.com/Aditya-1304/chess_engine.git
     cd chess_engine
     ```
 
