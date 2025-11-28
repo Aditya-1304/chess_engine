@@ -1,6 +1,6 @@
 use crate::board::Board;
 use crate::book::OpeningBook;
-use crate::moves::{format, Move, MoveList};
+use crate::moves::{Move, MoveList, format};
 use crate::syzygy::auto_load;
 use crate::thread::ThreadPool;
 use crate::types::Color;
@@ -17,7 +17,10 @@ pub fn main_loop() {
     // let num_threads = 1;
 
     let mut thread_pool = ThreadPool::new(num_threads, 128); // 128MB TT
+
     let mut book = OpeningBook::new("Perfect2023.bin");
+
+    let mut move_overhead: u64 = 0;
 
     if book.file.is_some() {
         println!("info string Opening book loaded successfully");
@@ -40,36 +43,37 @@ pub fn main_loop() {
             );
             println!("option name Hash type spin default 128 min 1 max 16384");
             println!("option name SyzygyPath type string default <empty>");
+            println!("option name Move Overhead type spin default 0 min 0 max 5000");
             println!("uciok");
         } else if cmd == "isready" {
             println!("readyok");
         } else if cmd.starts_with("setoption") {
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if parts.len() >= 5 && parts[1] == "name" && parts[3] == "value" {
-                let name = parts[2].to_lowercase();
-                let value = parts[4..].join(" ");
+            let cmd_lower = cmd.to_lowercase();
 
-                match name.as_str() {
-                    "threads" => {
-                        if let Ok(n) = value.parse::<usize>() {
-                            let n = n.max(1).min(256);
-                            let hash_mb = 128; // Keep current hash size
-                            thread_pool = ThreadPool::new(n, hash_mb);
-                            println!("info string Threads set to {}", n);
-                        }
+            if cmd_lower.contains("name move overhead") {
+                if let Some(val_part) = cmd.split("value").nth(1) {
+                    if let Ok(val) = val_part.trim().parse::<u64>() {
+                        move_overhead = val;
                     }
-                    "hash" => {
-                        if let Ok(mb) = value.parse::<usize>() {
-                            let mb = mb.max(1).min(16384);
-                            let threads = thread_pool.num_threads;
-                            thread_pool = ThreadPool::new(threads, mb);
-                            println!("info string Hash set to {} MB", mb);
-                        }
+                }
+            } else if cmd_lower.contains("name threads") {
+                if let Some(val_part) = cmd.split("value").nth(1) {
+                    if let Ok(n) = val_part.trim().parse::<usize>() {
+                        let n = n.max(1).min(256);
+                        thread_pool = ThreadPool::new(n, 128);
                     }
-                    "syzygypath" => {
-                        crate::syzygy::init_global_syzygy(&value);
+                }
+            } else if cmd_lower.contains("name hash") {
+                if let Some(val_part) = cmd.split("value").nth(1) {
+                    if let Ok(mb) = val_part.trim().parse::<usize>() {
+                        let mb = mb.max(1).min(16384);
+                        let threads = thread_pool.num_threads;
+                        thread_pool = ThreadPool::new(threads, mb);
                     }
-                    _ => {}
+                }
+            } else if cmd_lower.contains("name syzygypath") {
+                if let Some(val_part) = cmd.split("value").nth(1) {
+                    crate::syzygy::init_global_syzygy(val_part.trim());
                 }
             }
         } else if cmd == "ucinewgame" {
@@ -77,7 +81,7 @@ pub fn main_loop() {
         } else if cmd.starts_with("position") {
             parse_position(cmd, &mut board);
         } else if cmd.starts_with("go") {
-            parse_go(cmd, &thread_pool, &mut board, &mut book);
+            parse_go(cmd, &thread_pool, &mut board, &mut book, move_overhead);
         } else if cmd == "stop" {
             thread_pool.stop();
         } else if cmd == "quit" {
@@ -133,7 +137,13 @@ fn parse_move(board: &Board, move_str: &str) -> Move {
     0
 }
 
-fn parse_go(cmd: &str, thread_pool: &ThreadPool, board: &mut Board, book: &mut OpeningBook) {
+fn parse_go(
+    cmd: &str,
+    thread_pool: &ThreadPool,
+    board: &mut Board,
+    book: &mut OpeningBook,
+    move_overhead: u64,
+) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let mut depth = 64u8;
     let mut wtime: u64 = 0;
@@ -210,21 +220,28 @@ fn parse_go(cmd: &str, thread_pool: &ThreadPool, board: &mut Board, book: &mut O
         }
     }
 
-    let safety_margin = 200_u64;
+    let safety_margin = 50_u64;
     let time_limit: u64;
     let hard_limit: u64;
 
     if movetime > 0 {
-        let spendable = movetime.saturating_sub(safety_margin);
+        let spendable = movetime
+            .saturating_sub(move_overhead)
+            .saturating_sub(safety_margin);
         time_limit = spendable.max(5).min(movetime.saturating_sub(1).max(1));
-        hard_limit = movetime.saturating_sub(5).max(time_limit + 10).min(movetime);
+        hard_limit = movetime
+            .saturating_sub(5)
+            .max(time_limit + 10)
+            .min(movetime);
     } else if wtime > 0 || btime > 0 {
         let (time_left, inc) = if board.side_to_move == Color::White {
             (wtime, winc)
         } else {
             (btime, binc)
         };
-        let usable = time_left.saturating_sub(safety_margin);
+
+        let real_time_left = time_left.saturating_sub(move_overhead);
+        let usable = real_time_left.saturating_sub(safety_margin);
 
         if usable == 0 {
             if inc == 0 {
@@ -247,8 +264,11 @@ fn parse_go(cmd: &str, thread_pool: &ThreadPool, board: &mut Board, book: &mut O
             }
 
             time_limit = tl.min(usable);
-            hard_limit = (tl * 3 / 2 + safety_margin)
-                .min(time_left.saturating_sub(safety_margin / 2).max(tl + 50));
+            hard_limit = (tl * 3 / 2 + safety_margin).min(
+                real_time_left
+                    .saturating_sub(safety_margin / 2)
+                    .max(tl + 50),
+            );
         }
     } else {
         // Infinite search or depth-only
@@ -256,12 +276,8 @@ fn parse_go(cmd: &str, thread_pool: &ThreadPool, board: &mut Board, book: &mut O
         hard_limit = u64::MAX;
     }
 
-    let (_score, best_move) = thread_pool.search(
-        board,
-        depth,
-        time_limit as u128,
-        hard_limit as u128,
-    );
+    let (_score, best_move) =
+        thread_pool.search(board, depth, time_limit as u128, hard_limit as u128);
 
     if let Some(m) = best_move {
         println!("bestmove {}", format(m));
