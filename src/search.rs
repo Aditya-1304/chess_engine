@@ -508,6 +508,15 @@ impl SearchThread {
         let mut move_list = MoveList::new();
         board.generate_pseudo_legal_moves(&mut move_list);
 
+        let counter_move = if let Some(prev) = self.prev_move {
+            let prev_to = moves::to_sq(prev);
+            let prev_pt = board.piece_type_on_unchecked(prev_to);
+            self.counter_moves[prev_pt as usize][prev_to as usize]
+        } else {
+            None
+        };
+
+
         // Score moves - add thread_id for slight move ordering variation (Lazy SMP)
         let mut move_scores = [0i32; 256];
         let move_slice = move_list.as_mut_slice();
@@ -526,24 +535,19 @@ impl SearchThread {
                     }
                 }
 
-                if let Some(prev) = self.prev_move {
-                    let prev_pt = board.piece_type_on(moves::to_sq(prev));
-                    if let Some(ppt) = prev_pt {
-                        let prev_to = moves::to_sq(prev);
-                        if self.counter_moves[ppt as usize][prev_to as usize] == Some(m) {
-                            move_scores[i] = 700000;
-                        }
-                    }
+                if counter_move == Some(m) {
+                    move_scores[i] = 700000;
                 }
+
                 if move_scores[i] == 0 {
-                    if let Some(pt) = board.piece_type_on(moves::from_sq(m)) {
-                        let c = board.side_to_move;
-                        let to = moves::to_sq(m);
-                        move_scores[i] = self.history[pt as usize][c as usize][to as usize];
-                        // Add small thread-based variation for Lazy SMP diversity
-                        move_scores[i] += ((self.thread_id as i32) * 7) % 13;
-                    }
+                    let pt = board.piece_type_on_unchecked(moves::from_sq(m));
+                    let c = board.side_to_move;
+                    let to = moves::to_sq(m);
+                    move_scores[i] = self.history[pt as usize][c as usize][to as usize];
+                    // Add small thread-based variation for Lazy SMP diversity
+                    move_scores[i] += ((self.thread_id as i32) * 7) % 13;
                 }
+
             }
         }
 
@@ -689,7 +693,7 @@ impl SearchThread {
                 if score > alpha {
                     alpha = score;
                     if !moves::is_capture(m) {
-                        let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
+                        let pt = board.piece_type_on_unchecked(moves::from_sq(m));
                         let c = board.side_to_move;
                         let to = moves::to_sq(m);
                         self.history[pt as usize][c as usize][to as usize] +=
@@ -706,7 +710,7 @@ impl SearchThread {
             }
             if alpha >= beta {
                 if !moves::is_capture(m) {
-                    let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
+                    let pt = board.piece_type_on_unchecked(moves::from_sq(m));
                     let c = board.side_to_move;
                     let to = moves::to_sq(m);
                     self.history[pt as usize][c as usize][to as usize] +=
@@ -719,25 +723,21 @@ impl SearchThread {
                     // History malus for failed quiets
                     for j in 0..quiet_count.saturating_sub(1) {
                         let failed_m = searched_quiets[j];
-                        if let Some(pt) = board.piece_type_on(moves::from_sq(failed_m)) {
-                            let to = moves::to_sq(failed_m);
-                            self.history[pt as usize][board.side_to_move as usize][to as usize] -=
-                                (depth as i32) * (depth as i32);
-                            if self.history[pt as usize][board.side_to_move as usize][to as usize]
-                                < -20000
-                            {
-                                self.history[pt as usize][board.side_to_move as usize]
-                                    [to as usize] = -20000;
-                            }
+                        let pt = board.piece_type_on_unchecked(moves::from_sq(failed_m));
+                        let to = moves::to_sq(failed_m);
+                        self.history[pt as usize][board.side_to_move as usize][to as usize] -=
+                            (depth as i32) * (depth as i32);
+                        if self.history[pt as usize][board.side_to_move as usize][to as usize] < -20000 {
+                            self.history[pt as usize][board.side_to_move as usize][to as usize] = -20000;
                         }
                     }
 
+
                     // Counter move update
                     if let Some(prev) = old_prev {
-                        if let Some(prev_pt) = board.piece_type_on(moves::to_sq(prev)) {
-                            let prev_to = moves::to_sq(prev);
-                            self.counter_moves[prev_pt as usize][prev_to as usize] = Some(m);
-                        }
+                        let prev_to = moves::to_sq(prev);
+                        let prev_pt = board.piece_type_on_unchecked(prev_to);
+                        self.counter_moves[prev_pt as usize][prev_to as usize] = Some(m);
                     }
 
                     if ply < 64 && self.killers[ply as usize][0] != Some(m) {
@@ -877,7 +877,7 @@ impl SearchThread {
         let to = moves::to_sq(m);
         let from = moves::from_sq(m);
         let victim = board.piece_type_on(to).unwrap_or(PieceType::Pawn);
-        let attacker = board.piece_type_on(from).unwrap();
+        let attacker = board.piece_type_on_unchecked(from);
         let vv = match victim {
             PieceType::Pawn => 1,
             PieceType::Knight => 2,

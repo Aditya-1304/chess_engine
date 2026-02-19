@@ -114,6 +114,12 @@ fn encode_piece(pt: PieceType, c: Color) -> u8 {
     (c as u8) * 6 + (pt as u8)
 }
 
+#[inline(always)]
+fn decode_piece_type(encoded: u8) -> PieceType {
+    let pt = if encoded < 6 { encoded } else { encoded - 6 };
+    PieceType::from(pt as usize)
+}
+
 impl Board {
 
     pub fn clone_for_search(&self) -> Self {
@@ -311,15 +317,23 @@ impl Board {
         fen
     }
 
-    #[inline(always)]
+   #[inline(always)]
     pub fn piece_type_on(&self, sq: Square) -> Option<PieceType> {
         let v = self.piece_on[sq as usize];
         if v == EMPTY_PIECE {
             None
         } else {
-            Some(PieceType::from((v % 6) as usize))
+            Some(decode_piece_type(v))
         }
     }
+
+    #[inline(always)]
+    pub fn piece_type_on_unchecked(&self, sq: Square) -> PieceType {
+        let v = self.piece_on[sq as usize];
+        debug_assert!(v != EMPTY_PIECE);
+        decode_piece_type(v)
+    }
+
 
 
     fn move_piece(&mut self, pt: PieceType, c: Color, from: Square, to: Square) {
@@ -396,12 +410,12 @@ impl Board {
         } else {
             Color::White
         };
-        let moving_piece = self.piece_type_on(from).unwrap();
+        let moving_piece = self.piece_type_on_unchecked(from);
         let captured = if moves::is_capture(m) {
             if flag == moves::EN_PASSANT_CAPTURE_FLAG {
                 Some(PieceType::Pawn)
             } else {
-                self.piece_type_on(to)
+                Some(self.piece_type_on_unchecked(to))
             }
         } else {
             None
@@ -536,7 +550,7 @@ impl Board {
         }
         self.side_to_move = us;
 
-        let mut moving_piece = self.piece_type_on(to).unwrap();
+        let mut moving_piece = self.piece_type_on_unchecked(to);
         if moves::is_promotion(m) {
             self.remove_piece(moving_piece, us, to);
             self.add_piece(PieceType::Pawn, us, to);
