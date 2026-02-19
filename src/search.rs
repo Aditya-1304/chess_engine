@@ -17,11 +17,14 @@ pub const MATE_SCORE: i32 = 31000;
 
 const NODE_UPDATE_INTERVAL: u64 = 16384;
 
-const EVAL_CACHE_WAYS: usize = 2;
+const EVAL_CACHE_WAYS: usize = 4;
 const EVAL_CACHE_SET_BITS: usize = 15;
 const EVAL_CACHE_SETS: usize = 1 << EVAL_CACHE_SET_BITS;
 const EVAL_CACHE_SET_MASK: usize = EVAL_CACHE_SETS - 1;
 
+const MAX_LMR_DEPTH: usize = 64;
+const MAX_LMR_MOVES: usize = 64;
+static LMR_TABLE: OnceLock<[[u8; MAX_LMR_MOVES + 1]; MAX_LMR_DEPTH + 1]> = OnceLock::new();
 
 
 
@@ -116,14 +119,14 @@ impl SearchThread {
             board.generate_pseudo_legal_moves(&mut root_moves);
             let mut legal_moves = Vec::new();
             for &m in root_moves.iter() {
-                let undo = board.make_move(m);
+                board.make_move(m);
                 let us = if board.side_to_move == Color::White {
                     Color::Black
                 } else {
                     Color::White
                 };
-                let king_sq =
-                    board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+                let king_sq = board.king_sq[us as usize];
+
                 if !board.is_square_attacked(king_sq, board.side_to_move) {
                     legal_moves.push(m);
                 }
@@ -162,7 +165,7 @@ impl SearchThread {
                                     };
 
                                     if promo_match {
-                                        let undo = board.make_move(m);
+                                        board.make_move(m);
                                         let us = if board.side_to_move == Color::White {
                                             Color::Black
                                         } else {
@@ -614,7 +617,7 @@ impl SearchThread {
                 }
             }
 
-            let undo = board.make_move(m);
+            board.make_move(m);
 
             let us = if board.side_to_move == Color::White {
                 Color::Black
@@ -645,12 +648,7 @@ impl SearchThread {
                     && !moves::is_promotion(m)
                     && !in_check
                 {
-                    let lmr_depth = (depth as f64).ln();
-                    let lmr_move = (legal_moves as f64).ln();
-                    reduction = (1.0 + lmr_depth * lmr_move / 2.0) as u8;
-                    if reduction >= depth {
-                        reduction = depth - 1;
-                    }
+                    reduction = lmr_reduction(depth, legal_moves);
                 }
 
                 let (s, _) = self.negamax(
@@ -839,7 +837,7 @@ impl SearchThread {
                 continue;
             }
 
-            let undo = board.make_move(m);
+            board.make_move(m);
 
             let us = if board.side_to_move == Color::White {
                 Color::Black
@@ -931,35 +929,39 @@ impl SearchThread {
     }
 
 
-    #[inline(always)]
+   #[inline(always)]
     fn evaluate_cached(&mut self, board: &Board) -> i32 {
         let key = board.zobrist_hash;
         let set = (key as usize) & EVAL_CACHE_SET_MASK;
         let valid = self.eval_cache_valid[set];
 
-        if (valid & 0b01) != 0 && self.eval_cache_keys[set][0] == key {
-            return self.eval_cache_vals[set][0] as i32;
-        }
-        if (valid & 0b10) != 0 && self.eval_cache_keys[set][1] == key {
-            return self.eval_cache_vals[set][1] as i32;
+        for way in 0..EVAL_CACHE_WAYS {
+            if (valid & (1 << way)) != 0 && self.eval_cache_keys[set][way] == key {
+                return self.eval_cache_vals[set][way] as i32;
+            }
         }
 
         let score = eval::evaluate(board);
 
-        let way = if (valid & 0b01) == 0 {
-            0
-        } else if (valid & 0b10) == 0 {
-            1
-        } else {
-            ((key >> 32) as usize) & 1
-        };
+        let mut replace_way = EVAL_CACHE_WAYS;
+        for way in 0..EVAL_CACHE_WAYS {
+            if (valid & (1 << way)) == 0 {
+                replace_way = way;
+                break;
+            }
+        }
 
-        self.eval_cache_keys[set][way] = key;
-        self.eval_cache_vals[set][way] = score as i16;
-        self.eval_cache_valid[set] |= 1 << way;
+        if replace_way == EVAL_CACHE_WAYS {
+            replace_way = ((key >> 32) as usize) & (EVAL_CACHE_WAYS - 1);
+        }
+
+        self.eval_cache_keys[set][replace_way] = key;
+        self.eval_cache_vals[set][replace_way] = score as i16;
+        self.eval_cache_valid[set] |= 1 << replace_way;
 
         score
     }
+
 
 
 }
@@ -983,6 +985,25 @@ fn score_from_tt(score: i32, ply: i32) -> i32 {
         score
     }
 }
+
+fn build_lmr_table() -> [[u8; MAX_LMR_MOVES + 1]; MAX_LMR_DEPTH + 1] {
+    let mut table = [[0u8; MAX_LMR_MOVES + 1]; MAX_LMR_DEPTH + 1];
+    for d in 1..=MAX_LMR_DEPTH {
+        for m in 1..=MAX_LMR_MOVES {
+            let r = (1.0 + (d as f64).ln() * (m as f64).ln() / 2.0) as i32;
+            table[d][m] = r.clamp(0, d.saturating_sub(1) as i32) as u8;
+        }
+    }
+    table
+}
+
+#[inline(always)]
+fn lmr_reduction(depth: u8, move_number: usize) -> u8 {
+    let d = (depth as usize).min(MAX_LMR_DEPTH);
+    let m = move_number.min(MAX_LMR_MOVES);
+    LMR_TABLE.get_or_init(build_lmr_table)[d][m]
+}
+
 
 pub struct Searcher {
     pub nodes: u64,

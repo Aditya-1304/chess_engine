@@ -126,7 +126,11 @@ impl Board {
         halfmove_clock: self.halfmove_clock,
         fullmove_number: self.fullmove_number,
         zobrist_hash: self.zobrist_hash,
-        history: self.history.clone(),
+        history: {
+            let mut h = Vec::with_capacity(self.history.len() + 256);
+            h.extend_from_slice(&self.history);
+            h
+        },
         accumulator: self.accumulator,
         king_sq: self.king_sq,
         piece_on: self.piece_on,
@@ -693,8 +697,7 @@ impl Board {
             } else {
                 Color::White
             };
-            let king_sq =
-                self.pieces[PieceType::King as usize][us as usize].trailing_zeros() as Square;
+            let king_sq = self.king_sq[us as usize];
 
             if !self.is_square_attacked(king_sq, self.side_to_move) {
                 nodes += self.perft(depth - 1);
@@ -891,7 +894,7 @@ mod tests {
         let original_hash = board.zobrist_hash;
 
         let m = moves::new(36, 26, moves::QUIET_MOVE_FLAG);
-        let undo = board.make_move(m);
+        board.make_move(m);
         board.unmake_move(m);
 
         assert_eq!(original_fen, board.to_fen());
