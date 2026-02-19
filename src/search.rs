@@ -8,7 +8,7 @@ use crate::{
     tt::TTFlag,
     types::{Color, PieceType},
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -16,6 +16,17 @@ const INF: i32 = 32000;
 pub const MATE_SCORE: i32 = 31000;
 
 const NODE_UPDATE_INTERVAL: u64 = 16384;
+
+const EVAL_CACHE_WAYS: usize = 4;
+const EVAL_CACHE_SET_BITS: usize = 15;
+const EVAL_CACHE_SETS: usize = 1 << EVAL_CACHE_SET_BITS;
+const EVAL_CACHE_SET_MASK: usize = EVAL_CACHE_SETS - 1;
+
+const MAX_LMR_DEPTH: usize = 64;
+const MAX_LMR_MOVES: usize = 64;
+static LMR_TABLE: OnceLock<[[u8; MAX_LMR_MOVES + 1]; MAX_LMR_DEPTH + 1]> = OnceLock::new();
+
+
 
 /// Thread-local search state for multi-threaded search
 pub struct SearchThread {
@@ -31,6 +42,11 @@ pub struct SearchThread {
     pub history: [[[i32; 64]; 2]; 6],
     pub counter_moves: [[Option<Move>; 64]; 6],
     pub prev_move: Option<Move>,
+    eval_cache_keys: Vec<[u64; EVAL_CACHE_WAYS]>,
+    eval_cache_vals: Vec<[i16; EVAL_CACHE_WAYS]>,
+    eval_cache_valid: Vec<u8>,
+
+
 }
 
 impl SearchThread {
@@ -48,6 +64,9 @@ impl SearchThread {
             history: [[[0; 64]; 2]; 6],
             counter_moves: [[None; 64]; 6],
             prev_move: None,
+            eval_cache_keys: vec![[0; EVAL_CACHE_WAYS]; EVAL_CACHE_SETS],
+            eval_cache_vals: vec![[0; EVAL_CACHE_WAYS]; EVAL_CACHE_SETS],
+            eval_cache_valid: vec![0; EVAL_CACHE_SETS],
         }
     }
 
@@ -87,6 +106,8 @@ impl SearchThread {
         self.start_time = Instant::now();
         self.killers = [[None; 2]; 64];
         self.age_history();
+        self.eval_cache_valid.fill(0);
+
 
         let mut best_move = None;
         let mut score = 0;
@@ -98,18 +119,18 @@ impl SearchThread {
             board.generate_pseudo_legal_moves(&mut root_moves);
             let mut legal_moves = Vec::new();
             for &m in root_moves.iter() {
-                let undo = board.make_move(m);
+                board.make_move(m);
                 let us = if board.side_to_move == Color::White {
                     Color::Black
                 } else {
                     Color::White
                 };
-                let king_sq =
-                    board.pieces[PieceType::King as usize][us as usize].trailing_zeros() as u8;
+                let king_sq = board.king_sq[us as usize];
+
                 if !board.is_square_attacked(king_sq, board.side_to_move) {
                     legal_moves.push(m);
                 }
-                board.unmake_move(m, undo);
+                board.unmake_move(m);
             }
 
             if legal_moves.len() == 1 {
@@ -144,7 +165,7 @@ impl SearchThread {
                                     };
 
                                     if promo_match {
-                                        let undo = board.make_move(m);
+                                        board.make_move(m);
                                         let us = if board.side_to_move == Color::White {
                                             Color::Black
                                         } else {
@@ -156,7 +177,7 @@ impl SearchThread {
                                             as u8;
                                         let legal =
                                             !board.is_square_attacked(king_sq, board.side_to_move);
-                                        board.unmake_move(m, undo);
+                                        board.unmake_move(m);
 
                                         if legal {
                                             let tb_score = match wdl {
@@ -440,7 +461,7 @@ impl SearchThread {
         }
 
         let static_eval = if !in_check {
-            eval::evaluate(board)
+            self.evaluate_cached(board)
         } else {
             -INF
         };
@@ -487,6 +508,15 @@ impl SearchThread {
         let mut move_list = MoveList::new();
         board.generate_pseudo_legal_moves(&mut move_list);
 
+        let counter_move = if let Some(prev) = self.prev_move {
+            let prev_to = moves::to_sq(prev);
+            let prev_pt = board.piece_type_on_unchecked(prev_to);
+            self.counter_moves[prev_pt as usize][prev_to as usize]
+        } else {
+            None
+        };
+
+
         // Score moves - add thread_id for slight move ordering variation (Lazy SMP)
         let mut move_scores = [0i32; 256];
         let move_slice = move_list.as_mut_slice();
@@ -505,24 +535,19 @@ impl SearchThread {
                     }
                 }
 
-                if let Some(prev) = self.prev_move {
-                    let prev_pt = board.piece_type_on(moves::to_sq(prev));
-                    if let Some(ppt) = prev_pt {
-                        let prev_to = moves::to_sq(prev);
-                        if self.counter_moves[ppt as usize][prev_to as usize] == Some(m) {
-                            move_scores[i] = 700000;
-                        }
-                    }
+                if counter_move == Some(m) {
+                    move_scores[i] = 700000;
                 }
+
                 if move_scores[i] == 0 {
-                    if let Some(pt) = board.piece_type_on(moves::from_sq(m)) {
-                        let c = board.side_to_move;
-                        let to = moves::to_sq(m);
-                        move_scores[i] = self.history[pt as usize][c as usize][to as usize];
-                        // Add small thread-based variation for Lazy SMP diversity
-                        move_scores[i] += ((self.thread_id as i32) * 7) % 13;
-                    }
+                    let pt = board.piece_type_on_unchecked(moves::from_sq(m));
+                    let c = board.side_to_move;
+                    let to = moves::to_sq(m);
+                    move_scores[i] = self.history[pt as usize][c as usize][to as usize];
+                    // Add small thread-based variation for Lazy SMP diversity
+                    move_scores[i] += ((self.thread_id as i32) * 7) % 13;
                 }
+
             }
         }
 
@@ -596,7 +621,7 @@ impl SearchThread {
                 }
             }
 
-            let undo = board.make_move(m);
+            board.make_move(m);
 
             let us = if board.side_to_move == Color::White {
                 Color::Black
@@ -605,7 +630,7 @@ impl SearchThread {
             };
 
             if board.is_square_attacked(board.king_sq[us as usize], board.side_to_move) {
-                board.unmake_move(m, undo);
+                board.unmake_move(m);
                 continue;
             }
 
@@ -627,12 +652,7 @@ impl SearchThread {
                     && !moves::is_promotion(m)
                     && !in_check
                 {
-                    let lmr_depth = (depth as f64).ln();
-                    let lmr_move = (legal_moves as f64).ln();
-                    reduction = (1.0 + lmr_depth * lmr_move / 2.0) as u8;
-                    if reduction >= depth {
-                        reduction = depth - 1;
-                    }
+                    reduction = lmr_reduction(depth, legal_moves);
                 }
 
                 let (s, _) = self.negamax(
@@ -656,7 +676,7 @@ impl SearchThread {
             }
 
             self.prev_move = old_prev;
-            board.unmake_move(m, undo);
+            board.unmake_move(m);
 
             if self.should_stop() {
                 return (0, None);
@@ -673,7 +693,7 @@ impl SearchThread {
                 if score > alpha {
                     alpha = score;
                     if !moves::is_capture(m) {
-                        let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
+                        let pt = board.piece_type_on_unchecked(moves::from_sq(m));
                         let c = board.side_to_move;
                         let to = moves::to_sq(m);
                         self.history[pt as usize][c as usize][to as usize] +=
@@ -690,7 +710,7 @@ impl SearchThread {
             }
             if alpha >= beta {
                 if !moves::is_capture(m) {
-                    let pt = board.piece_type_on(moves::from_sq(m)).unwrap();
+                    let pt = board.piece_type_on_unchecked(moves::from_sq(m));
                     let c = board.side_to_move;
                     let to = moves::to_sq(m);
                     self.history[pt as usize][c as usize][to as usize] +=
@@ -703,25 +723,21 @@ impl SearchThread {
                     // History malus for failed quiets
                     for j in 0..quiet_count.saturating_sub(1) {
                         let failed_m = searched_quiets[j];
-                        if let Some(pt) = board.piece_type_on(moves::from_sq(failed_m)) {
-                            let to = moves::to_sq(failed_m);
-                            self.history[pt as usize][board.side_to_move as usize][to as usize] -=
-                                (depth as i32) * (depth as i32);
-                            if self.history[pt as usize][board.side_to_move as usize][to as usize]
-                                < -20000
-                            {
-                                self.history[pt as usize][board.side_to_move as usize]
-                                    [to as usize] = -20000;
-                            }
+                        let pt = board.piece_type_on_unchecked(moves::from_sq(failed_m));
+                        let to = moves::to_sq(failed_m);
+                        self.history[pt as usize][board.side_to_move as usize][to as usize] -=
+                            (depth as i32) * (depth as i32);
+                        if self.history[pt as usize][board.side_to_move as usize][to as usize] < -20000 {
+                            self.history[pt as usize][board.side_to_move as usize][to as usize] = -20000;
                         }
                     }
 
+
                     // Counter move update
                     if let Some(prev) = old_prev {
-                        if let Some(prev_pt) = board.piece_type_on(moves::to_sq(prev)) {
-                            let prev_to = moves::to_sq(prev);
-                            self.counter_moves[prev_pt as usize][prev_to as usize] = Some(m);
-                        }
+                        let prev_to = moves::to_sq(prev);
+                        let prev_pt = board.piece_type_on_unchecked(prev_to);
+                        self.counter_moves[prev_pt as usize][prev_to as usize] = Some(m);
                     }
 
                     if ply < 64 && self.killers[ply as usize][0] != Some(m) {
@@ -768,7 +784,7 @@ impl SearchThread {
 
         self.increment_nodes();
 
-        let stand_pat = eval::evaluate(board);
+        let stand_pat = self.evaluate_cached(board);
         if stand_pat >= beta {
             return beta;
         }
@@ -809,10 +825,19 @@ impl SearchThread {
 
             let m = move_list.get(i);
 
-            if see::see(board, m) < -50 {
+            // Delta prune bad captures before make/unmake.
+            // If even best material swing can't raise alpha, skip.
+            let gain = self.capture_gain(board, m);
+            if stand_pat + gain + 120 < alpha {
                 continue;
             }
-            let undo = board.make_move(m);
+
+            let see_threshold = if stand_pat + 200 < alpha { 0 } else { -50 };
+            if see::see(board, m) < see_threshold {
+                continue;
+            }
+
+            board.make_move(m);
 
             let us = if board.side_to_move == Color::White {
                 Color::Black
@@ -821,12 +846,12 @@ impl SearchThread {
             };
 
             if board.is_square_attacked(board.king_sq[us as usize], board.side_to_move) {
-                board.unmake_move(m, undo);
+                board.unmake_move(m);
                 continue;
             }
 
             let score = -self.quiescence(board, -beta, -alpha);
-            board.unmake_move(m, undo);
+            board.unmake_move(m);
 
             if score >= beta {
                 return beta;
@@ -852,7 +877,7 @@ impl SearchThread {
         let to = moves::to_sq(m);
         let from = moves::from_sq(m);
         let victim = board.piece_type_on(to).unwrap_or(PieceType::Pawn);
-        let attacker = board.piece_type_on(from).unwrap();
+        let attacker = board.piece_type_on_unchecked(from);
         let vv = match victim {
             PieceType::Pawn => 1,
             PieceType::Knight => 2,
@@ -871,6 +896,74 @@ impl SearchThread {
         };
         10 * vv - av + 10000
     }
+
+    #[inline(always)]
+    fn capture_gain(&self, board: &Board, m: Move) -> i32 {
+        let capture_value = if moves::flag(m) == moves::EN_PASSANT_CAPTURE_FLAG {
+            100
+        } else {
+            match board.piece_type_on(moves::to_sq(m)) {
+                Some(PieceType::Pawn) => 100,
+                Some(PieceType::Knight) => 320,
+                Some(PieceType::Bishop) => 330,
+                Some(PieceType::Rook) => 500,
+                Some(PieceType::Queen) => 900,
+                Some(PieceType::King) => 20000,
+                None => 0,
+            }
+        };
+
+        let promotion_bonus = if moves::is_promotion(m) {
+            match moves::promotion_piece(m) {
+                PieceType::Knight => 220, // 320 - 100
+                PieceType::Bishop => 230, // 330 - 100
+                PieceType::Rook => 400,   // 500 - 100
+                PieceType::Queen => 800,  // 900 - 100
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        capture_value + promotion_bonus
+    }
+
+
+   #[inline(always)]
+    fn evaluate_cached(&mut self, board: &Board) -> i32 {
+        let key = board.zobrist_hash;
+        let set = (key as usize) & EVAL_CACHE_SET_MASK;
+        let valid = self.eval_cache_valid[set];
+
+        for way in 0..EVAL_CACHE_WAYS {
+            if (valid & (1 << way)) != 0 && self.eval_cache_keys[set][way] == key {
+                return self.eval_cache_vals[set][way] as i32;
+            }
+        }
+
+        let score = eval::evaluate(board);
+
+        let mut replace_way = EVAL_CACHE_WAYS;
+        for way in 0..EVAL_CACHE_WAYS {
+            if (valid & (1 << way)) == 0 {
+                replace_way = way;
+                break;
+            }
+        }
+
+        if replace_way == EVAL_CACHE_WAYS {
+            replace_way = ((key >> 32) as usize) & (EVAL_CACHE_WAYS - 1);
+        }
+
+        self.eval_cache_keys[set][replace_way] = key;
+        self.eval_cache_vals[set][replace_way] = score as i16;
+        self.eval_cache_valid[set] |= 1 << replace_way;
+
+        score
+    }
+
+
+
 }
 
 fn score_to_tt(score: i32, ply: i32) -> i32 {
@@ -892,6 +985,25 @@ fn score_from_tt(score: i32, ply: i32) -> i32 {
         score
     }
 }
+
+fn build_lmr_table() -> [[u8; MAX_LMR_MOVES + 1]; MAX_LMR_DEPTH + 1] {
+    let mut table = [[0u8; MAX_LMR_MOVES + 1]; MAX_LMR_DEPTH + 1];
+    for d in 1..=MAX_LMR_DEPTH {
+        for m in 1..=MAX_LMR_MOVES {
+            let r = (1.0 + (d as f64).ln() * (m as f64).ln() / 2.0) as i32;
+            table[d][m] = r.clamp(0, d.saturating_sub(1) as i32) as u8;
+        }
+    }
+    table
+}
+
+#[inline(always)]
+fn lmr_reduction(depth: u8, move_number: usize) -> u8 {
+    let d = (depth as usize).min(MAX_LMR_DEPTH);
+    let m = move_number.min(MAX_LMR_MOVES);
+    LMR_TABLE.get_or_init(build_lmr_table)[d][m]
+}
+
 
 pub struct Searcher {
     pub nodes: u64,
