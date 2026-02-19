@@ -380,7 +380,7 @@ impl Board {
         hash
     }
 
-    pub fn make_move(&mut self, m: Move) -> UndoInfo {
+    pub fn make_move(&mut self, m: Move) {
         let keys = zobrist::keys();
         let mut hash = self.zobrist_hash;
         let from = moves::from_sq(m);
@@ -411,7 +411,7 @@ impl Board {
         captured_piece: captured_byte,
         old_zobrist_hash: self.zobrist_hash,
         };
-        self.history.push(undo.clone());
+        self.history.push(undo);
 
         // NNUE Incremental Updates
         let has_nnue = nnue::is_enabled();
@@ -506,12 +506,13 @@ impl Board {
             self.accumulator[us as usize] = nnue::refresh_accumulator_side(self, us);
         }
 
-        undo
+        
     }
 
-    pub fn unmake_move(&mut self, m: Move, undo: UndoInfo) {
-        let _ = self.history.pop();
+    pub fn unmake_move(&mut self, m: Move) {
+        let undo = self.history.pop().expect("unmake_move called with empty history");
         self.zobrist_hash = undo.old_zobrist_hash;
+
 
         let from = moves::from_sq(m);
         let to = moves::to_sq(m);
@@ -698,7 +699,7 @@ impl Board {
             if !self.is_square_attacked(king_sq, self.side_to_move) {
                 nodes += self.perft(depth - 1);
             }
-            self.unmake_move(m, undo);
+            self.unmake_move(m);
         }
         nodes
     }
@@ -891,7 +892,7 @@ mod tests {
 
         let m = moves::new(36, 26, moves::QUIET_MOVE_FLAG);
         let undo = board.make_move(m);
-        board.unmake_move(m, undo);
+        board.unmake_move(m);
 
         assert_eq!(original_fen, board.to_fen());
         assert_eq!(original_hash, board.zobrist_hash);
