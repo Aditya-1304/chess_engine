@@ -411,18 +411,16 @@ unsafe fn add_weights_avx2_direct(acc: &mut Accumulator, weights: &[i16], offset
     }
 }
 
-pub fn refresh_accumulator(board: &Board) -> [Accumulator; 2] {
-    let net = match NETWORK.get() { 
-        Some(n) => n, 
-        None => return [Accumulator::default(); 2] 
+pub fn refresh_accumulator_side(board: &Board, perspective: Color) -> Accumulator {
+    let net = match NETWORK.get() {
+        Some(n) => n,
+        None => return Accumulator::default(),
     };
-    
-    let mut accs = [Accumulator::default(); 2];
-    accs[0].values.copy_from_slice(&net.ft_biases);
-    accs[1].values.copy_from_slice(&net.ft_biases);
 
-    let wk_sq = board.king_sq[Color::White as usize];
-    let bk_sq = board.king_sq[Color::Black as usize];
+    let mut acc = Accumulator::default();
+    acc.values.copy_from_slice(&net.ft_biases);
+
+    let king_sq = board.king_sq[perspective as usize];
 
     #[cfg(target_arch = "x86_64")]
     if use_avx2() {
@@ -435,24 +433,22 @@ pub fn refresh_accumulator(board: &Board) -> [Accumulator; 2] {
                     while bb != 0 {
                         let sq = bb.trailing_zeros() as u8;
                         bb &= bb - 1;
-                        
-                        let idx_w = make_index(Color::White, wk_sq, sq, pt, pc);
-                        let idx_b = make_index(Color::Black, bk_sq, sq, pt, pc);
-                        
-                        if idx_w != usize::MAX {
-                            add_weights_avx2_direct(&mut accs[0], &net.ft_weights, idx_w * HALF_DIMENSIONS);
-                        }
-                        if idx_b != usize::MAX {
-                            add_weights_avx2_direct(&mut accs[1], &net.ft_weights, idx_b * HALF_DIMENSIONS);
+
+                        let idx = make_index(perspective, king_sq, sq, pt, pc);
+                        if idx != usize::MAX {
+                            add_weights_avx2_direct(
+                                &mut acc,
+                                &net.ft_weights,
+                                idx * HALF_DIMENSIONS,
+                            );
                         }
                     }
                 }
             }
         }
-        return accs;
+        return acc;
     }
 
-    // Scalar fallback
     for pt_idx in 0..5 {
         let pt = PieceType::from(pt_idx);
         for c_idx in 0..2 {
@@ -461,27 +457,29 @@ pub fn refresh_accumulator(board: &Board) -> [Accumulator; 2] {
             while bb != 0 {
                 let sq = bb.trailing_zeros() as u8;
                 bb &= bb - 1;
-                
-                let idx_w = make_index(Color::White, wk_sq, sq, pt, pc);
-                let idx_b = make_index(Color::Black, bk_sq, sq, pt, pc);
-                
-                if idx_w != usize::MAX {
-                    let off = idx_w * HALF_DIMENSIONS;
+
+                let idx = make_index(perspective, king_sq, sq, pt, pc);
+                if idx != usize::MAX {
+                    let off = idx * HALF_DIMENSIONS;
                     for i in 0..HALF_DIMENSIONS {
-                        accs[0].values[i] = accs[0].values[i].saturating_add(net.ft_weights[off + i]);
-                    }
-                }
-                if idx_b != usize::MAX {
-                    let off = idx_b * HALF_DIMENSIONS;
-                    for i in 0..HALF_DIMENSIONS {
-                        accs[1].values[i] = accs[1].values[i].saturating_add(net.ft_weights[off + i]);
+                        acc.values[i] = acc.values[i].saturating_add(net.ft_weights[off + i]);
                     }
                 }
             }
         }
     }
-    accs
+
+    acc
 }
+
+
+pub fn refresh_accumulator(board: &Board) -> [Accumulator; 2] {
+    [
+        refresh_accumulator_side(board, Color::White),
+        refresh_accumulator_side(board, Color::Black),
+    ]
+}
+
 
 /// Clipped ReLU: clamp to [0, 127] for i16 input
 #[inline]

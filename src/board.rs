@@ -32,6 +32,7 @@ pub struct Board {
   pub history: Vec<UndoInfo>,
   pub accumulator: [Accumulator; 2],
   pub king_sq: [Square; 2],
+  pub piece_on: [u8; 64],
 }
 
 const WK_CASTLE: u8 = 0b0001;
@@ -106,6 +107,13 @@ static CASTLE_MASK: [u8; 64] = [
   !BK_CASTLE,
 ];
 
+const EMPTY_PIECE: u8 = 0xFF;
+
+#[inline(always)]
+fn encode_piece(pt: PieceType, c: Color) -> u8 {
+    (c as u8) * 6 + (pt as u8)
+}
+
 impl Board {
 
     pub fn clone_for_search(&self) -> Self {
@@ -118,9 +126,11 @@ impl Board {
         halfmove_clock: self.halfmove_clock,
         fullmove_number: self.fullmove_number,
         zobrist_hash: self.zobrist_hash,
-        history: Vec::with_capacity(128),
+        history: self.history.clone(),
         accumulator: self.accumulator,
         king_sq: self.king_sq,
+        piece_on: self.piece_on,
+
       }
     }
     pub fn from_fen(fen: &str) -> Result<Board, &'static str> {
@@ -297,21 +307,25 @@ impl Board {
         fen
     }
 
+    #[inline(always)]
     pub fn piece_type_on(&self, sq: Square) -> Option<PieceType> {
-        let bit = 1 << sq;
-        for pt_idx in 0..6 {
-            if (self.pieces[pt_idx][0] | self.pieces[pt_idx][1]) & bit != 0 {
-                return Some(PieceType::from(pt_idx));
-            }
+        let v = self.piece_on[sq as usize];
+        if v == EMPTY_PIECE {
+            None
+        } else {
+            Some(PieceType::from((v % 6) as usize))
         }
-        None
     }
+
 
     fn move_piece(&mut self, pt: PieceType, c: Color, from: Square, to: Square) {
         let from_to_bb = (1 << from) | (1 << to);
         self.pieces[pt as usize][c as usize] ^= from_to_bb;
         self.occupancy[c as usize] ^= from_to_bb;
         self.occupancy[2] ^= from_to_bb;
+
+        self.piece_on[from as usize] = EMPTY_PIECE;
+        self.piece_on[to as usize] = encode_piece(pt, c);
     }
 
     fn add_piece(&mut self, pt: PieceType, c: Color, sq: Square) {
@@ -319,14 +333,18 @@ impl Board {
         self.pieces[pt as usize][c as usize] |= bit;
         self.occupancy[c as usize] |= bit;
         self.occupancy[2] |= bit;
+        self.piece_on[sq as usize] = encode_piece(pt, c);
     }
+
 
     fn remove_piece(&mut self, pt: PieceType, c: Color, sq: Square) {
         let bit = 1 << sq;
         self.pieces[pt as usize][c as usize] &= !bit;
         self.occupancy[c as usize] &= !bit;
         self.occupancy[2] &= !bit;
+        self.piece_on[sq as usize] = EMPTY_PIECE;
     }
+
 
     fn calculate_zobrist_hash(&self) -> ZHash {
         let keys = zobrist::keys();
@@ -485,7 +503,7 @@ impl Board {
 
         //  King Move Refresh 
         if has_nnue && moving_piece == PieceType::King {
-            self.accumulator = nnue::refresh_accumulator(self);
+            self.accumulator[us as usize] = nnue::refresh_accumulator_side(self, us);
         }
 
         undo
@@ -545,7 +563,7 @@ impl Board {
 
         if nnue::is_enabled() {
             if moving_piece == PieceType::King {
-                self.accumulator = nnue::refresh_accumulator(self);
+                self.accumulator[us as usize] = nnue::refresh_accumulator_side(self, us);
             } else {
                 self.apply_nnue_updates(m, moving_piece, captured_piece_type, us, them, false);
             }
@@ -840,6 +858,7 @@ impl Default for Board {
             history: Vec::new(),
             accumulator: [Accumulator::default(); 2],
             king_sq: [4, 60],
+            piece_on: [EMPTY_PIECE; 64]
         }
     }
 }

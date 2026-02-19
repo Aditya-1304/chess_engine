@@ -16,6 +16,10 @@ const INF: i32 = 32000;
 pub const MATE_SCORE: i32 = 31000;
 
 const NODE_UPDATE_INTERVAL: u64 = 16384;
+const EVAL_CACHE_BITS: usize = 16;
+const EVAL_CACHE_SIZE: usize = 1 << EVAL_CACHE_BITS;
+const EVAL_CACHE_MASK: usize = EVAL_CACHE_SIZE - 1;
+
 
 /// Thread-local search state for multi-threaded search
 pub struct SearchThread {
@@ -31,6 +35,10 @@ pub struct SearchThread {
     pub history: [[[i32; 64]; 2]; 6],
     pub counter_moves: [[Option<Move>; 64]; 6],
     pub prev_move: Option<Move>,
+    eval_cache_keys: Vec<u64>,
+    eval_cache_vals: Vec<i16>,
+    eval_cache_used: Vec<u8>,
+
 }
 
 impl SearchThread {
@@ -48,6 +56,9 @@ impl SearchThread {
             history: [[[0; 64]; 2]; 6],
             counter_moves: [[None; 64]; 6],
             prev_move: None,
+            eval_cache_keys: vec![0; EVAL_CACHE_SIZE],
+            eval_cache_vals: vec![0; EVAL_CACHE_SIZE],
+            eval_cache_used: vec![0; EVAL_CACHE_SIZE],
         }
     }
 
@@ -87,6 +98,7 @@ impl SearchThread {
         self.start_time = Instant::now();
         self.killers = [[None; 2]; 64];
         self.age_history();
+        self.eval_cache_used.fill(0);
 
         let mut best_move = None;
         let mut score = 0;
@@ -440,7 +452,7 @@ impl SearchThread {
         }
 
         let static_eval = if !in_check {
-            eval::evaluate(board)
+            self.evaluate_cached(board)
         } else {
             -INF
         };
@@ -768,7 +780,7 @@ impl SearchThread {
 
         self.increment_nodes();
 
-        let stand_pat = eval::evaluate(board);
+        let stand_pat = self.evaluate_cached(board);
         if stand_pat >= beta {
             return beta;
         }
@@ -871,6 +883,22 @@ impl SearchThread {
         };
         10 * vv - av + 10000
     }
+
+    #[inline(always)]
+    fn evaluate_cached(&mut self, board: &Board) -> i32 {
+        let idx = (board.zobrist_hash as usize) & EVAL_CACHE_MASK;
+
+        if self.eval_cache_used[idx] != 0 && self.eval_cache_keys[idx] == board.zobrist_hash {
+            return self.eval_cache_vals[idx] as i32;
+        }
+
+        let score = eval::evaluate(board);
+        self.eval_cache_used[idx] = 1;
+        self.eval_cache_keys[idx] = board.zobrist_hash;
+        self.eval_cache_vals[idx] = score as i16;
+        score
+    }
+
 }
 
 fn score_to_tt(score: i32, ply: i32) -> i32 {
